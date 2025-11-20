@@ -53,7 +53,6 @@ sudo apt install -y \
   gnome-tweaks \
   gvfs-backends \
   nautilus-share \
-  nautilus-extension-gnome-terminal \
   bluez-obexd \
   libreoffice \
   thunderbird \
