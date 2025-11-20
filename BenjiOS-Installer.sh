@@ -209,55 +209,55 @@ EOF
 fi
 
 ########################################
-# GNOME Shell extensions: ArcMenu + Dash to Panel (user scope)
+# GNOME Shell – install Dash to Panel & ArcMenu from Ubuntu packages
 ########################################
 
-echo "==> Installing ArcMenu + Dash to Panel (user extensions)"
+echo "==> Installing Dash to Panel & ArcMenu extensions (if available in this Ubuntu version)"
 
-EXT_BASE="$HOME/.local/share/gnome-shell/extensions"
-mkdir -p "$EXT_BASE"
+DTP_AVAILABLE=false
+ARC_AVAILABLE=false
 
-# Dash to Panel
-DTP_UUID="dash-to-panel@jderose9.github.com"
-DTP_DIR="$EXT_BASE/$DTP_UUID"
-
-if [ ! -d "$DTP_DIR" ]; then
-  echo "   -> Cloning Dash to Panel into $DTP_DIR"
-  git clone https://github.com/home-sweet-gnome/dash-to-panel.git "$DTP_DIR"
-  if [ -d "$DTP_DIR/schemas" ]; then
-    glib-compile-schemas "$DTP_DIR/schemas" || true
-  fi
+# Temporarily disable 'exit on error' just for these installs
+set +e
+sudo apt install -y gnome-shell-extension-dash-to-panel
+if [ $? -eq 0 ]; then
+  DTP_AVAILABLE=true
+else
+  echo "WARNING: gnome-shell-extension-dash-to-panel not available in apt."
 fi
 
-# ArcMenu
-ARC_UUID="arcmenu@arcmenu.com"
-ARC_DIR="$EXT_BASE/$ARC_UUID"
-
-if [ ! -d "$ARC_DIR" ]; then
-  echo "   -> Cloning ArcMenu into $ARC_DIR"
-  git clone https://gitlab.com/arcmenu/ArcMenu.git "$ARC_DIR"
-  if [ -d "$ARC_DIR/schemas" ]; then
-    glib-compile-schemas "$ARC_DIR/schemas" || true
-  fi
+sudo apt install -y gnome-shell-extension-arc-menu
+if [ $? -eq 0 ]; then
+  ARC_AVAILABLE=true
+else
+  echo "WARNING: gnome-shell-extension-arc-menu not available in apt."
 fi
+set -e
 
-########################################
-# GNOME Shell – enable Dash to Panel + ArcMenu, disable Ubuntu Dock
-########################################
-
-echo "==> Enabling Dash to Panel + ArcMenu and disabling Ubuntu Dock"
+echo "==> Enabling Dash to Panel / ArcMenu and handling Ubuntu Dock"
 
 if command -v gnome-extensions >/dev/null 2>&1; then
-  # Disable Ubuntu Dock (so Dash to Panel is the only panel)
-  if gnome-extensions list | grep -q 'ubuntu-dock@ubuntu.com'; then
-    gnome-extensions disable ubuntu-dock@ubuntu.com || true
+  # Enable Dash to Panel if it exists
+  if [ "$DTP_AVAILABLE" = true ] && gnome-extensions list | grep -q 'dash-to-panel@jderose9.github.com'; then
+    echo "   -> Enabling Dash to Panel"
+    gnome-extensions enable dash-to-panel@jderose9.github.com || true
+
+    # Only disable Ubuntu Dock once Dash to Panel is present
+    if gnome-extensions list | grep -q 'ubuntu-dock@ubuntu.com'; then
+      echo "   -> Disabling Ubuntu Dock (replaced by Dash to Panel)"
+      gnome-extensions disable ubuntu-dock@ubuntu.com || true
+    fi
+  else
+    echo "   -> Dash to Panel not available; keeping Ubuntu Dock enabled."
   fi
 
-  echo "   -> Enabling Dash to Panel ($DTP_UUID)"
-  gnome-extensions enable "$DTP_UUID" || true
-
-  echo "   -> Enabling ArcMenu ($ARC_UUID)"
-  gnome-extensions enable "$ARC_UUID" || true
+  # Enable ArcMenu if available
+  if [ "$ARC_AVAILABLE" = true ] && gnome-extensions list | grep -q 'arcmenu@arcmenu.com'; then
+    echo "   -> Enabling ArcMenu"
+    gnome-extensions enable arcmenu@arcmenu.com || true
+  else
+    echo "   -> ArcMenu not available; you can install it later via Extension Manager."
+  fi
 else
   echo "WARNING: gnome-extensions CLI not found; cannot auto-enable extensions."
 fi
