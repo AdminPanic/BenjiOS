@@ -6,8 +6,4 @@ As soon as things are tested somewhat OK I´ll add a propper description and fla
 
 Command to run this on a freshly installed Ubuntu 25.10 OS
 
-wget https://raw.githubusercontent.com/AdminPanic/BenjiOS/main/BenjiOS-Installer.sh
-
-chmod +x BenjiOS-Installer.sh
-
-./BenjiOS-Installer.sh
+wget -O BenjiOS-Installer.sh https://raw.githubusercontent.com/AdminPanic/BenjiOS/main/BenjiOS-Installer.sh && chmod +x BenjiOS-Installer.sh && ./BenjiOS-Installer.sh
