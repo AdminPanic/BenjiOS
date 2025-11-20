@@ -263,6 +263,79 @@ else
 fi
 
 ########################################
+# GNOME Shell – apply BenjiOS layout for Dash to Panel & ArcMenu
+########################################
+
+echo "==> Applying BenjiOS panel and ArcMenu layout"
+
+# Dash to Panel layout
+dconf load /org/gnome/shell/extensions/dash-to-panel/ << 'EOF'
+[/]
+animate-appicon-hover=false
+animate-appicon-hover-animation-extent={'RIPPLE': 4, 'PLANK': 4, 'SIMPLE': 1}
+appicon-margin=4
+appicon-padding=6
+appicon-style='NORMAL'
+dot-position='BOTTOM'
+dot-style-unfocused='DOTS'
+extension-version=72
+focus-highlight-color='#106b2d'
+focus-highlight-dominant=false
+group-apps=true
+hotkeys-overlay-combo='TEMPORARILY'
+multi-monitors=true
+panel-anchors='{"BNQ-L8D06617SL0":"MIDDLE","BNQ-L8D06816SL0":"MIDDLE","IVM-12467445A1875":"MIDDLE"}'
+panel-element-positions='{"BNQ-L8D06617SL0":[{"element":"showAppsButton","visible":false,"position":"stackedTL"},{"element":"activitiesButton","visible":false,"position":"stackedTL"},{"element":"leftBox","visible":true,"position":"stackedTL"},{"element":"taskbar","visible":true,"position":"stackedTL"},{"element":"centerBox","visible":true,"position":"stackedBR"},{"element":"rightBox","visible":true,"position":"stackedBR"},{"element":"dateMenu","visible":true,"position":"stackedBR"},{"element":"systemMenu","visible":true,"position":"stackedBR"},{"element":"desktopButton","visible":true,"position":"stackedBR"}],"BNQ-L8D06816SL0":[{"element":"showAppsButton","visible":false,"position":"stackedTL"},{"element":"activitiesButton","visible":false,"position":"stackedTL"},{"element":"leftBox","visible":true,"position":"stackedTL"},{"element":"taskbar","visible":true,"position":"stackedTL"},{"element":"centerBox","visible":true,"position":"stackedBR"},{"element":"rightBox","visible":true,"position":"stackedBR"},{"element":"dateMenu","visible":true,"position":"stackedBR"},{"element":"systemMenu","visible":true,"position":"stackedBR"},{"element":"desktopButton","visible":true,"position":"stackedBR"}],"IVM-12467445A1875":[{"element":"showAppsButton","visible":false,"position":"stackedTL"},{"element":"activitiesButton","visible":false,"position":"stackedTL"},{"element":"leftBox","visible":true,"position":"stackedTL"},{"element":"taskbar","visible":true,"position":"stackedTL"},{"element":"centerBox","visible":true,"position":"stackedBR"},{"element":"rightBox","visible":true,"position":"stackedBR"},{"element":"dateMenu","visible":true,"position":"stackedBR"},{"element":"systemMenu","visible":true,"position":"stackedBR"},{"element":"desktopButton","visible":true,"position":"stackedBR"}]}'
+panel-element-positions-monitors-sync=true
+panel-lengths='{}'
+panel-positions='{}'
+panel-side-margins=0
+panel-sizes='{"BNQ-L8D06617SL0":44,"BNQ-L8D06816SL0":44,"IVM-12467445A1875":44}'
+prefs-opened=false
+progress-show-count=true
+show-apps-icon-file=''
+show-favorites=true
+show-running-apps=true
+stockgs-keep-dash=false
+stockgs-keep-top-panel=false
+stockgs-panelbtn-click-only=false
+window-preview-title-position='TOP'
+EOF
+
+# ArcMenu layout
+dconf load /org/gnome/shell/extensions/arcmenu/ << 'EOF'
+[/]
+application-shortcuts=[{'id': 'ArcMenu_Software', 'name': 'Software'}, {'id': 'org.gnome.Settings.desktop'}, {'id': 'org.gnome.tweaks.desktop'}, {'id': 'ArcMenu_ActivitiesOverview', 'name': 'Activities Overview', 'icon': 'view-fullscreen-symbolic'}]
+arc-menu-icon=44
+context-menu-items=[{'id': 'ArcMenu_Settings', 'name': 'ArcMenu Settings', 'icon': 'ArcMenu_ArcMenuIcon'}, {'id': 'ArcMenu_PanelExtensionSettings', 'name': 'Panel Extension Settings', 'icon': 'application-x-addon-symbolic'}, {'id': 'ArcMenu_ShowDesktop', 'name': 'Show Desktop', 'icon': 'computer-symbolic'}]
+custom-menu-button-icon-size=25.0
+distro-icon=2
+menu-button-active-bg-color=(true, 'rgb(16,107,45)')
+menu-button-active-fg-color=(false, 'rgb(16,107,45)')
+menu-button-fg-color=(true, 'rgb(237,51,59)')
+menu-button-hover-bg-color=(true, 'rgb(16,107,45)')
+menu-button-icon='Menu_Icon'
+menu-item-active-bg-color='rgb(15,126,101)'
+menu-item-hover-bg-color='rgb(16,107,45)'
+menu-layout='Windows'
+menu-width-adjustment=0
+multi-monitor=true
+override-menu-theme=true
+pinned-apps=[{'id': 'org.gnome.Nautilus.desktop'}, {'id': 'gnome-extensions prefs arcmenu@arcmenu.com', 'name': 'ArcMenu Settings', 'icon': 'ArcMenu_ArcMenuIcon'}]
+power-options=[(0, true), (1, false), (2, true), (3, true), (4, false), (5, false), (6, false), (7, false)]
+prefs-visible-page=0
+recently-installed-apps=['com.discordapp.Discord.desktop']
+search-entry-border-radius=(true, 25)
+show-activities-button=false
+show-category-sub-menus=false
+update-notifier-project-version=69
+vert-separator=true
+windows-disable-frequent-apps=true
+windows-disable-pinned-apps=true
+windows-layout-extra-shortcuts=[{'id': 'org.gnome.Nautilus.desktop'}, {'id': 'org.gnome.Settings.desktop'}]
+EOF
+
+########################################
 # GNOME appearance & power profile
 ########################################
 
