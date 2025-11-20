@@ -136,7 +136,7 @@ flatpak install -y flathub \
   org.keepassxc.KeePassXC \
   com.github.qarmin.czkawka \
   org.kde.digikam \
-  com.github.borgbase.Vorta
+  com.borgbase.Vorta
 
 ########################################
 # rEFInd + Theme (BsxM1) + Secure Boot Setup (optional)
@@ -300,6 +300,18 @@ if command -v snap >/dev/null 2>&1; then
   echo "==> Refreshing Snap packages"
   sudo snap refresh || true
 fi
+
+########################################
+# Package cleanup
+########################################
+
+echo "==> Cleaning up unused packages and apt cache"
+
+sudo apt autoremove --purge -y || true
+sudo apt clean || true
+
+echo "==> Cleaning up unused Flatpak runtimes (if any)"
+flatpak remove --unused -y || true
 
 ########################################
 # GUI CHECKLIST on Desktop
