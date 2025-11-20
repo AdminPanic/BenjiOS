@@ -77,7 +77,8 @@ sudo apt install -y \
   mesa-utils \
   vulkan-tools \
   gamemode \
-  mangohud
+  mangohud \
+  lutris
 
 echo "==> Installing monitoring, sensors, fancontrol, SMART"
 sudo apt install -y \
@@ -132,7 +133,6 @@ flatpak install -y flathub \
   com.valvesoftware.Steam \
   com.heroicgameslauncher.hgl \
   net.davidotek.pupgui2 \
-  net.lutris.Lutris \
   org.keepassxc.KeePassXC \
   com.github.qarmin.czkawka \
   org.kde.digikam \
