@@ -585,4 +585,35 @@ Integration & misc:
 
 EOF
 
-echo "==> Done. A reboot is recommended. After reboot, follow POST_INSTALL_GUI_STEPS.txt on your Desktop."
+echo
+echo "=========================================="
+echo "  BenjiOS Installer – setup complete"
+echo "=========================================="
+echo
+echo "Summary of what was done:"
+echo " - Updated system packages (apt) and enabled 32-bit support"
+echo " - Installed desktop, office, network and media tools"
+echo " - Installed gaming stack (Steam, Heroic, ProtonUp-Qt, Lutris, etc.)"
+echo " - Installed monitoring, backup and firmware tools"
+echo " - Configured Flatpak + Flathub and updated Flatpak apps"
+echo " - Installed rEFInd with BsxM1 theme (if enabled in config)"
+echo " - Set GNOME to dark theme with green accent and performance power mode"
+echo " - Applied BenjiOS Dash to Panel + ArcMenu layout (where extensions are available)"
+echo " - Created post-install checklist:"
+echo "       $DESKTOP_DIR/POST_INSTALL_GUI_STEPS.txt"
+echo
+
+# Ask user if they want to reboot now
+read -r -p "Reboot now to apply all changes? [y/N]: " REPLY
+
+case "${REPLY,,}" in
+  y|yes)
+    echo "==> Rebooting system..."
+    sudo reboot
+    ;;
+  *)
+    echo "==> No reboot requested."
+    echo "    You can reboot later; after restart, follow the steps in:"
+    echo "    $DESKTOP_DIR/POST_INSTALL_GUI_STEPS.txt"
+    ;;
+esac
