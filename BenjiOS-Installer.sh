@@ -1,210 +1,341 @@
 #!/bin/bash
 # BenjiOS-Installer.sh - Ubuntu 25.10 post-install configuration script
 
-# Exit immediately if a command exits with a non-zero status (except where we handle errors manually)
 set -o errexit
 set -o pipefail
 
 # Use noninteractive mode for apt to avoid prompts
 export DEBIAN_FRONTEND=noninteractive
 
-# Zenity will be used for GUI prompts. Ensure Zenity is installed.
+# Raw GitHub base for this repo
+RAW_BASE="https://raw.githubusercontent.com/AdminPanic/BenjiOS/main"
+
+########################################
+# Ensure Zenity is available
+########################################
 if ! command -v zenity >/dev/null 2>&1; then
-    echo "Zenity not found. Installing zenity..."
-    sudo apt-get update -y && sudo apt-get install -y zenity
+  echo "Zenity not found. Installing zenity..."
+  sudo apt-get update -y
+  sudo apt-get install -y zenity
 fi
 
-# License acceptance prompt
+########################################
+# License prompt
+########################################
 zenity --question --width=400 --title="License Agreement" \
-       --text="This script will install various software. By proceeding, you acknowledge that you agree to the licenses of all included software (e.g. Ubuntu, rEFInd, Steam, Heroic, Lutris, etc.). Do you wish to continue?"
+  --text="This script will install various software.\n\nBy proceeding, you acknowledge that you agree to the licenses of all included software (Ubuntu, rEFInd, Steam, Heroic, Lutris, etc.).\n\nDo you wish to continue?"
+
 if [[ $? -ne 0 ]]; then
-    # User chose "No"
-    zenity --info --width=300 --text="Installation canceled. No changes were made."
-    exit 0
+  zenity --info --width=300 --text="Installation canceled. No changes were made."
+  exit 0
 fi
 
-# Ask if user wants to install rEFInd boot manager
-INSTALL_REFIND=$(zenity --list --radiolist --width=400 --height=250 \
-    --title="rEFInd Installation" --text="Install rEFInd UEFI Boot Manager?" \
-    --column="Select" --column="Option" \
-    TRUE "Yes, install rEFInd boot manager" FALSE "No, skip rEFInd")
-REFIND_MODE=""  # will hold boot configuration mode if rEFInd is installed
+########################################
+# Zenity options
+########################################
+
+# rEFInd
+INSTALL_REFIND=$(zenity --list --radiolist --width=420 --height=260 \
+  --title="rEFInd Installation" \
+  --text="Install rEFInd UEFI Boot Manager?" \
+  --column="Select" --column="Option" \
+  TRUE  "Yes, install rEFInd boot manager" \
+  FALSE "No, skip rEFInd")
+
+REFIND_MODE=""
 if [[ "$INSTALL_REFIND" == "Yes, install rEFInd boot manager" ]]; then
-    # If yes, ask about system boot configuration
-    REFIND_MODE=$(zenity --list --radiolist --width=420 --height=240 \
-        --title="rEFInd Configuration" --text="Select your system's boot configuration for rEFInd:" \
-        --column="Select" --column="Boot Setup" \
-        TRUE "Single boot (Ubuntu only)" FALSE "Dual boot (Ubuntu + Windows)" FALSE "Show all entries (no filtering)")
+  REFIND_MODE=$(zenity --list --radiolist --width=420 --height=260 \
+    --title="rEFInd Configuration" \
+    --text="Select your boot configuration for rEFInd:" \
+    --column="Select" --column="Boot Setup" \
+    TRUE  "Single boot (Ubuntu only)" \
+    FALSE "Dual boot (Ubuntu + Windows)" \
+    FALSE "Show all entries (no filtering)")
 fi
 
-# Ask about Monitoring Stack
-INSTALL_MON=$(zenity --question --width=400 --title="Monitoring Tools" \
-    --text="Install system monitoring tools (resource monitors, sensors, etc.)?" && echo "Yes" || echo "No")
+# Monitoring
+INSTALL_MON=$(
+  zenity --question --width=400 --title="Monitoring Tools" \
+    --text="Install monitoring tools (htop, btop, sensors, psensor, etc.)?" \
+    && echo "Yes" || echo "No"
+)
 
-# Ask about Gaming Stack
-INSTALL_GAMING=$(zenity --question --width=400 --title="Gaming Stack" \
-    --text="Install Gaming Stack (Steam, Lutris, Heroic, ProtonUp-Qt, MangoHud, GameMode, etc.)?" && echo "Yes" || echo "No")
+# Gaming
+INSTALL_GAMING=$(
+  zenity --question --width=400 --title="Gaming Stack" \
+    --text="Install Gaming Stack (Steam, Lutris, Heroic, ProtonUp-Qt, MangoHud, GameMode, etc.)?" \
+    && echo "Yes" || echo "No"
+)
 
-# Ask about Additional Tools
-INSTALL_TOOLS=$(zenity --question --width=400 --title="Additional Tools" \
-    --text="Install additional desktop tools (digiKam, KeePassXC, VLC, Rhythmbox, OpenVPN, Thunderbird)?" && echo "Yes" || echo "No")
+# Additional Tools
+INSTALL_TOOLS=$(
+  zenity --question --width=400 --title="Additional Tools" \
+    --text="Install additional tools (digiKam, KeePassXC, VLC, Rhythmbox, OpenVPN, Thunderbird)?" \
+    && echo "Yes" || echo "No"
+)
 
-# Ask about Remote Management
-INSTALL_REMOTE=$(zenity --question --width=400 --title="Remote Management" \
-    --text="Enable Remote Management features (SSH, Firewall rule, RDP, Wake-on-LAN)?" && echo "Yes" || echo "No")
+# Remote management
+INSTALL_REMOTE=$(
+  zenity --question --width=400 --title="Remote Management" \
+    --text="Enable Remote Management features (SSH, firewall rules, RDP, Wake-on-LAN)?" \
+    && echo "Yes" || echo "No"
+)
 
-# Begin installation steps
+########################################
+# Common base setup
+########################################
+echo "==> Updating APT and installing base dependencies..."
 sudo apt-get update -y
 
-# 1. rEFInd Boot Manager Installation and Configuration
-if [[ "$INSTALL_REFIND" == "Yes, install rEFInd boot manager" ]]; then
-    echo "Installing rEFInd UEFI boot manager..."
-    sudo apt-get install -y refind
-    
-    # Mount the EFI System Partition if not already (usually /boot/efi is mounted on Ubuntu)
-    if ! mountpoint -q /boot/efi; then
-        echo "Mounting EFI System Partition..."
-        EFI_PART=$(sudo blkid -t PARTLABEL="EFI System" -o device | head -n1)
-        if [[ -n "$EFI_PART" ]]; then
-            sudo mount "$EFI_PART" /boot/efi
-        fi
-    fi
+# Ensure some basic tools we rely on exist
+sudo apt-get install -y \
+  wget curl unzip dconf-cli software-properties-common
 
-    # Copy custom rEFInd config and theme
-    echo "Applying custom rEFInd configuration and theme..."
-    sudo mkdir -p /boot/efi/EFI/refind/themes/bsmx
-    # Download refind.conf from repo
-    sudo wget -qO /boot/efi/EFI/refind/refind.conf "${RAW_BASE:-https://raw.githubusercontent.com/YourGitHubUser/BenjiOS-Installer/main}/refind/refind.conf"
-    # Download theme files (theme.conf and images)
-    sudo wget -qO /boot/efi/EFI/refind/themes/bsmx/theme.conf "${RAW_BASE:-https://raw.githubusercontent.com/YourGitHubUser/BenjiOS-Installer/main}/refind/theme.conf"
-    # Download all theme assets (icons, backgrounds, selection images) from the repository
-    # (Assuming assets are packaged in a zip for convenience)
-    sudo wget -qO /tmp/bsmx_theme.zip "${RAW_BASE:-https://raw.githubusercontent.com/YourGitHubUser/BenjiOS-Installer/main}/refind/BSxM1_theme.zip"
-    sudo unzip -o /tmp/bsmx_theme.zip -d /boot/efi/EFI/refind/themes/bsmx/
+########################################
+# 1. rEFInd installation and theming
+########################################
+if [[ "$INSTALL_REFIND" == "Yes, install rEFInd boot manager" ]]; then
+  echo "==> Installing rEFInd (non-interactive)..."
+
+  # Preseed debconf so we don't get the ncurses ESP question
+  # Template name: refind/install_to_esp  (boolean)
+  echo "refind refind/install_to_esp boolean true" | sudo debconf-set-selections
+
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y refind
+
+  # Make sure EFI system partition is mounted
+  if ! mountpoint -q /boot/efi; then
+    EFI_PART=$(sudo blkid -t PARTLABEL="EFI System" -o device | head -n1 || true)
+    if [[ -n "$EFI_PART" ]]; then
+      echo "==> Mounting EFI System Partition ($EFI_PART) on /boot/efi..."
+      sudo mount "$EFI_PART" /boot/efi
+    else
+      echo "WARNING: Could not detect EFI System Partition. Skipping rEFInd theme setup."
+    fi
+  fi
+
+  if mountpoint -q /boot/efi; then
+    REFIND_DIR="/boot/efi/EFI/refind"
+    THEME_DIR="$REFIND_DIR/themes/bsmx"
+
+    echo "==> Applying custom rEFInd configuration and BsxM1 theme..."
+    sudo mkdir -p "$THEME_DIR"
+
+    # Pull refind.conf and theme.conf from repo
+    sudo wget -qO "$REFIND_DIR/refind.conf" \
+      "$RAW_BASE/refind/refind.conf"
+
+    sudo wget -qO "$THEME_DIR/theme.conf" \
+      "$RAW_BASE/refind/theme.conf"
+
+    # Theme assets (zipped)
+    sudo wget -qO /tmp/bsmx_theme.zip \
+      "$RAW_BASE/refind/BSxM1_theme.zip"
+
+    sudo unzip -o /tmp/bsmx_theme.zip -d "$THEME_DIR/"
     sudo rm -f /tmp/bsmx_theme.zip
 
-    # Adjust rEFInd config based on user selection
+    # Adjust timeouts / visibility according to REFIND_MODE
     if [[ "$REFIND_MODE" == "Single boot (Ubuntu only)" ]]; then
-        # Single boot: hide other OS entries (like Windows) if any were present
-        sudo sed -i 's/^timeout.*/timeout 5/' /boot/efi/EFI/refind/refind.conf   # faster boot (5s timeout)
-        # (No Windows expected, but we ensure quick timeout)
+      # Faster timeout, hide obvious non-Linux loaders if your base refind.conf has dont_scan_files
+      sudo sed -i 's/^timeout .*/timeout 5/' "$REFIND_DIR/refind.conf"
+      # Example: hide fwupd + extra grub entries if present
+      sudo sed -i 's/^dont_scan_files.*/dont_scan_files grubx64.efi,fwupx64.efi/' "$REFIND_DIR/refind.conf" || true
+
     elif [[ "$REFIND_MODE" == "Dual boot (Ubuntu + Windows)" ]]; then
-        # Dual boot: ensure Windows is visible (already handled by default config)
-        sudo sed -i 's/^timeout.*/timeout 10/' /boot/efi/EFI/refind/refind.conf  # 10s timeout for menu
-        # Already not hiding Windows bootmgr in config, no further action needed
+      # Slightly longer timeout for OS choice
+      sudo sed -i 's/^timeout .*/timeout 10/' "$REFIND_DIR/refind.conf"
+      # Keep dont_scan_files as defined in your shipped config
+
     elif [[ "$REFIND_MODE" == "Show all entries (no filtering)" ]]; then
-        # Show all boot entries: do not hide any loaders (including grub or fwupd)
-        sudo sed -i 's/^dont_scan_files/#dont_scan_files/' /boot/efi/EFI/refind/refind.conf
-        # Optionally enable scanning firmware entries:
-        sudo sed -i 's/^#scanfor.*/scanfor internal,external,optical,manual,firmware/' /boot/efi/EFI/refind/refind.conf
-        sudo sed -i 's/^timeout.*/timeout 15/' /boot/efi/EFI/refind/refind.conf  # give more time if many entries
+      sudo sed -i 's/^timeout .*/timeout 15/' "$REFIND_DIR/refind.conf"
+      # Uncomment scanfor if present and include firmware
+      sudo sed -i 's/^#\?scanfor.*/scanfor internal,external,optical,manual,firmware/' "$REFIND_DIR/refind.conf" || true
+      # Comment out dont_scan_files if present
+      sudo sed -i 's/^dont_scan_files/#dont_scan_files/' "$REFIND_DIR/refind.conf" || true
     fi
+  fi
 fi
 
-# 2. Monitoring Stack Installation
+########################################
+# 2. Monitoring stack
+########################################
 if [[ "$INSTALL_MON" == "Yes" ]]; then
-    echo "Installing monitoring tools..."
-    sudo apt-get install -y htop glances btop lm-sensors psensor
-    # Configure sensors (non-interactively accept defaults where possible)
-    sudo yes | sensors-detect || true  # sensors-detect might prompt; we auto-confirm safe defaults
+  echo "==> Installing monitoring tools..."
+  sudo apt-get install -y \
+    htop glances btop lm-sensors psensor
+
+  # Non-interactive sensors-detect (safe defaults)
+  echo "==> Running sensors-detect (auto-confirming defaults)..."
+  sudo yes | sudo sensors-detect || true
 fi
 
-# 3. Gaming Stack Installation
+########################################
+# 3. Gaming stack
+########################################
 if [[ "$INSTALL_GAMING" == "Yes" ]]; then
-    echo "Installing gaming stack..."
-    # Enable 32-bit architecture for gaming libs if not already
-    sudo dpkg --add-architecture i386 && sudo apt-get update -y
-    # Install core gaming components via APT
-    sudo apt-get install -y steam gamemode mangohud
-    # Use Lutris PPA for latest Lutris
-    sudo add-apt-repository -y ppa:lutris-team/lutris
-    sudo apt-get update -y
-    sudo apt-get install -y lutris
+  echo "==> Installing gaming stack..."
 
-    # Install Flatpak and Flathub if not already
-    if ! command -v flatpak >/dev/null 2>&1; then
-        sudo apt-get install -y flatpak gnome-software-plugin-flatpak
-        sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-    fi
-    # Install Flatpak apps for gaming
-    flatpak install -y flathub com.heroicgameslauncher.hgl   # Heroic Games Launcher
-    flatpak install -y flathub net.davidotek.pupgui2         # ProtonUp-Qt
-    # (Lutris is installed via apt; Steam via apt as well)
+  # 32-bit libs for Wine/Proton
+  sudo dpkg --add-architecture i386
+  sudo apt-get update -y
 
-    # Configure MangoHud and GameMode (if any config needed, e.g. enable GameMode globally)
-    # Ensure GameMode daemon is running
-    systemctl --user enable gamemoded --now || true
+  # Core gaming bits (from Ubuntu / Lutris PPA)
+  sudo apt-get install -y \
+    steam \
+    gamemode \
+    mangohud
+
+  # Lutris PPA for fresher Lutris
+  sudo add-apt-repository -y ppa:lutris-team/lutris
+  sudo apt-get update -y
+  sudo apt-get install -y lutris
+
+  # Flatpak + Flathub (for Heroic + ProtonUp-Qt)
+  if ! command -v flatpak >/dev/null 2>&1; then
+    sudo apt-get install -y flatpak gnome-software-plugin-flatpak
+  fi
+
+  sudo flatpak remote-add --if-not-exists flathub \
+    https://flathub.org/repo/flathub.flatpakrepo
+
+  # Heroic & ProtonUp-Qt
+  flatpak install -y flathub com.heroicgameslauncher.hgl
+  flatpak install -y flathub net.davidotek.pupgui2
+
+  # Ensure GameMode user service is active
+  systemctl --user enable gamemoded --now || true
 fi
 
-# 4. Additional Tools Installation
+########################################
+# 4. Additional desktop tools
+########################################
 if [[ "$INSTALL_TOOLS" == "Yes" ]]; then
-    echo "Installing additional productivity tools..."
-    sudo apt-get install -y digikam keepassxc vlc rhythmbox openvpn thunderbird
-    # Ensure OpenVPN support in NetworkManager
-    sudo apt-get install -y network-manager-openvpn network-manager-openvpn-gnome
+  echo "==> Installing additional desktop tools..."
+  sudo apt-get install -y \
+    digikam \
+    keepassxc \
+    vlc \
+    rhythmbox \
+    openvpn \
+    thunderbird \
+    network-manager-openvpn \
+    network-manager-openvpn-gnome
 fi
 
-# 5. Remote Management Setup
+########################################
+# 5. Remote management
+########################################
 if [[ "$INSTALL_REMOTE" == "Yes" ]]; then
-    echo "Enabling remote management features..."
-    # SSH Service
-    sudo apt-get install -y openssh-server
-    sudo systemctl enable ssh --now
+  echo "==> Enabling remote management (SSH, RDP, WOL)..."
 
-    # Firewall (UFW) setup: allow SSH (port 22) and RDP (port 3389)
-    if sudo ufw status | grep -q "Status: inactive"; then
-        sudo ufw allow 22/tcp
-        sudo ufw allow 3389/tcp
-        sudo ufw --force enable
-    else
-        sudo ufw allow 22/tcp
-        sudo ufw allow 3389/tcp
-    fi
+  # SSH server
+  sudo apt-get install -y openssh-server
+  sudo systemctl enable ssh --now
 
-    # RDP Service (using xrdp for separate login session)
-    sudo apt-get install -y xrdp
-    sudo systemctl enable xrdp --now
-    sudo adduser xrdp ssl-cert  # allow xrdp to use certificates for encryption
-    # (Alternatively, Ubuntu 25.10 has built-in GNOME Remote Desktop for RDP which can be enabled via Settings UI)
+  # UFW firewall rules for SSH + RDP
+  if sudo ufw status | grep -q "Status: inactive"; then
+    sudo ufw allow 22/tcp
+    sudo ufw allow 3389/tcp
+    sudo ufw --force enable
+  else
+    sudo ufw allow 22/tcp
+    sudo ufw allow 3389/tcp
+  fi
 
-    # Wake-on-LAN configuration
-    sudo apt-get install -y ethtool
-    # Enable WOL on all wired interfaces now and persist via NetworkManager
-    for IFACE in $(ls /sys/class/net | grep -v -E '^lo|^vbox'); do
-        # Set WOL to "magic packet" for each interface
-        sudo ethtool -s "$IFACE" wol g || true
-    done
-    # Persist WOL via NetworkManager connections
-    nmcli -t -f UUID,DEVICE,TYPE connection show | awk -F: '$3=="ethernet"{print $1}' | while read -r UUID; do
-        nmcli connection modify "$UUID" 802-3-ethernet.wake-on-lan magic || true
-    done
+  # xrdp for RDP sessions
+  sudo apt-get install -y xrdp
+  sudo systemctl enable xrdp --now
+  sudo adduser xrdp ssl-cert || true
 
-    # Prevent NIC power-down on shutdown (so WOL still works)
-    if [[ -f /etc/default/halt ]]; then
-        sudo sed -i 's/^NETDOWN=.*/NETDOWN=no/' /etc/default/halt || echo "NETDOWN=no" | sudo tee -a /etc/default/halt
-    else
-        echo "NETDOWN=no" | sudo tee /etc/default/halt >/dev/null
-    fi
-    # If TLP (power management) is installed, ensure WOL is not disabled by it
-    if [[ -f /etc/default/tlp ]]; then
-        sudo sed -i 's/^WOL_DISABLE=.*/WOL_DISABLE=N/' /etc/default/tlp
-    fi
+  # Wake-on-LAN
+  sudo apt-get install -y ethtool
+
+  # Enable WOL now on all non-loopback, non-virtual interfaces
+  for IFACE in $(ls /sys/class/net | grep -Ev '^(lo|vbox|docker|virbr)'); do
+    sudo ethtool -s "$IFACE" wol g || true
+  done
+
+  # Persist WOL via NetworkManager
+  nmcli -t -f UUID,TYPE connection show | awk -F: '$2=="ethernet"{print $1}' | while read -r UUID; do
+    nmcli connection modify "$UUID" 802-3-ethernet.wake-on-lan magic || true
+  done
+
+  # Prevent NETDOWN so NIC stays powered for WOL
+  if [[ -f /etc/default/halt ]]; then
+    sudo sed -i 's/^NETDOWN=.*/NETDOWN=no/' /etc/default/halt || true
+  else
+    echo "NETDOWN=no" | sudo tee /etc/default/halt >/dev/null
+  fi
+
+  # If TLP exists, ensure it doesn't kill WOL
+  if [[ -f /etc/default/tlp ]]; then
+    sudo sed -i 's/^WOL_DISABLE=.*/WOL_DISABLE=N/' /etc/default/tlp || true
+  fi
 fi
 
-# 6. GNOME Shell Extensions and UI Config (ArcMenu, Dash-to-Panel)
-echo "Configuring GNOME Shell UI (ArcMenu and Dash-to-Panel extensions)..."
-# Install extensions via apt if available
-sudo apt-get install -y gir1.2-gmenu-3.0 gnome-shell-extension-arc-menu gnome-shell-extension-dash-to-panel || true
-# Load extension settings from provided config files
-dconf load /org/gnome/shell/extensions/arc-menu/ < <(wget -qO- "${RAW_BASE:-https://raw.githubusercontent.com/YourGitHubUser/BenjiOS-Installer/main}/configs/arcmenu.conf")
-dconf load /org/gnome/shell/extensions/dash-to-panel/ < <(wget -qO- "${RAW_BASE:-https://raw.githubusercontent.com/YourGitHubUser/BenjiOS-Installer/main}/configs/app-icons-taskbar.conf")
+########################################
+# 6. GNOME Shell – ArcMenu + Taskbar config
+########################################
+echo "==> Configuring GNOME Shell UI (ArcMenu + Taskbar layout)..."
 
+# Dependencies for ArcMenu (gmenu)
+sudo apt-get install -y gir1.2-gmenu-3.0
+
+# Try to install ArcMenu & Dash-to-Panel from Ubuntu repos (if available)
+sudo apt-get install -y \
+  gnome-shell-extension-arc-menu \
+  gnome-shell-extension-dash-to-panel \
+  || true
+
+# Download and place the BenjiOS taskbar icon
+ICON_DIR="$HOME/.local/share/icons/BenjiOS"
+mkdir -p "$ICON_DIR"
+wget -qO "$ICON_DIR/taskbar.png" "$RAW_BASE/assets/taskbar.png"
+
+# Load ArcMenu settings from repo
+if command -v dconf >/dev/null 2>&1; then
+  wget -qO- "$RAW_BASE/configs/arcmenu.conf" \
+    | dconf load /org/gnome/shell/extensions/arc-menu/ || true
+
+  # Load Dash-to-Panel / App Icons Taskbar layout into that schema path
+  wget -qO- "$RAW_BASE/configs/app-icons-taskbar.conf" \
+    | dconf load /org/gnome/shell/extensions/dash-to-panel/ || true
+fi
+
+########################################
 # 7. Clean-up
-echo "Cleaning up..."
+########################################
+echo "==> Cleaning up..."
 sudo apt-get autoremove -y
 sudo apt-get autoclean -y
-# Clear any temporary files if created
-rm -f /tmp/bsmx_theme.zip 2>/dev/null
+rm -f /tmp/bsmx_theme.zip 2>/dev/null || true
 
-zenity --info --width=300 --title="BenjiOS Installer" \
-       --text="Installation complete! Some changes may require a reboot (especially rEFInd installation and GNOME extensions). Please reboot your system to apply all changes."
+########################################
+# Final summary + reboot prompt
+########################################
+SUMMARY=$(
+  cat <<EOF
+BenjiOS Installer – setup complete.
+
+What was done:
+  • Updated APT and installed base tools (wget, unzip, dconf-cli)
+  • (Optional) Installed and themed rEFInd boot manager
+  • (Optional) Installed monitoring tools (htop, btop, sensors, psensor)
+  • (Optional) Installed gaming stack (Steam, Lutris, Heroic, ProtonUp-Qt, GameMode, MangoHud)
+  • (Optional) Installed extra desktop tools (digiKam, KeePassXC, VLC, Rhythmbox, OpenVPN, Thunderbird)
+  • (Optional) Enabled remote management (SSH, firewall, xrdp, Wake-on-LAN)
+  • Configured GNOME Shell with ArcMenu + Taskbar layout and BenjiOS icon
+
+A reboot is strongly recommended to fully apply all changes.
+EOF
+)
+
+zenity --info --width=450 --title="BenjiOS Installer" --text="$SUMMARY"
+
+if zenity --question --width=350 --title="BenjiOS Installer" \
+   --text="Reboot now to apply all changes?"; then
+  sudo reboot
+fi
+
+exit 0
