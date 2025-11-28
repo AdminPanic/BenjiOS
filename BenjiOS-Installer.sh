@@ -8,7 +8,7 @@ set -e
 # Key features:
 #  - Curated stacks (office, gaming, monitoring, backup, management, auto_updates, amd_tweaks, refind)
 #  - Flatpak + Flathub setup
-#  - rEFInd with BsxM1 theme
+#  - rEFInd with BsxM1 theme and selectable boot mode
 #  - GNOME dark theme + BenjiOS layout
 #  - ArcMenu + App Icons Taskbar:
 #       * Installed from extensions.gnome.org
@@ -26,6 +26,9 @@ ZENITY_H=480
 # Will be filled when we install GNOME extensions
 ARCMENU_UUID=""
 TASKBAR_UUID=""
+
+# rEFInd boot mode: single (Ubuntu only), dual (Ubuntu + Windows), all (show everything)
+REFIND_BOOT_MODE="dual"
 
 #--------------------------------------
 # Basic sanity
@@ -50,7 +53,7 @@ export DEBIAN_FRONTEND=noninteractive
 # License dialog
 #--------------------------------------
 LICENSE_FILE="$(mktemp)"
-cat > "$LICENSE_FILE" << 'EOF'
+cat > "$LICENSE_FILE" << 'EOF_LIC'
 BenjiOS Installer – License & EULA summary
 
 This script will:
@@ -66,7 +69,7 @@ By continuing, you agree to:
  • The Microsoft core fonts EULA (if ubuntu-restricted-extras is installed)
 
 No warranty. Use at your own risk.
-EOF
+EOF_LIC
 
 zenity --text-info \
   --title="BenjiOS Installer – License" \
@@ -183,6 +186,25 @@ if has_stack "refind"; then
   INSTALL_REFIND=true
 fi
 
+# Ask rEFInd boot mode if we install it
+if $INSTALL_REFIND; then
+  REFIND_BOOT_MODE="$(zenity --list \
+    --title="BenjiOS – rEFInd Boot Mode" \
+    --width="$ZENITY_W" --height="$ZENITY_H" \
+    --text="Choose how rEFInd should present boot entries:\n\n• Single Boot Ubuntu\n• Dual Boot Ubuntu + Windows\n• Show all detected entries" \
+    --radiolist \
+    --column="Use" --column="ID"   --column="Description" \
+    TRUE  "dual"   "Dual Boot: Ubuntu + Windows, hide helper/junk entries" \
+    FALSE "single" "Single Boot: Ubuntu only, hide Windows entries" \
+    FALSE "all"    "Show all detected entries (Linux, Windows, tools, etc.)" \
+  )" || true
+
+  case "$REFIND_BOOT_MODE" in
+    single|dual|all) ;;
+    *) REFIND_BOOT_MODE="dual" ;;
+  esac
+fi
+
 #--------------------------------------
 # Step 1 – apt update + full-upgrade + i386
 #--------------------------------------
@@ -210,13 +232,8 @@ echo "$SUDO_PASS" | sudo -S bash -c "echo 'ttf-mscorefonts-installer msttcorefon
 APT_PKGS=()
 FLATPAK_PKGS=()
 
-add_apt() {
-  APT_PKGS+=("$@")
-}
-
-add_flatpak() {
-  FLATPAK_PKGS+=("$@")
-}
+add_apt() { APT_PKGS+=("$@"); }
+add_flatpak() { FLATPAK_PKGS+=("$@"); }
 
 # Core stack (always)
 add_apt \
@@ -391,16 +408,15 @@ setup_auto_updates() {
   local days="$1"
   local tmp_file
   tmp_file="$(mktemp)"
-  cat > "$tmp_file" <<EOF
+  cat > "$tmp_file" <<EOF_AUTO
 APT::Periodic::Update-Package-Lists "$days";
 APT::Periodic::Download-Upgradeable-Packages "$days";
 APT::Periodic::AutocleanInterval "7";
 APT::Periodic::Unattended-Upgrade "$days";
-EOF
+EOF_AUTO
   run_sudo cp "$tmp_file" /etc/apt/apt.conf.d/20auto-upgrades
   rm -f "$tmp_file"
 
-  # Make sure unattended-upgrades service is active
   run_sudo systemctl enable --now unattended-upgrades.service >/dev/null 2>&1 || true
   run_sudo dpkg-reconfigure -f noninteractive unattended-upgrades || true
 }
@@ -414,14 +430,11 @@ fi
 #--------------------------------------
 configure_gnome_look_and_power() {
   if command -v gsettings >/dev/null 2>&1; then
-    # Dark appearance
     gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' 2>/dev/null || true
     gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-dark' 2>/dev/null || true
-    # Accent (may not exist on all versions)
     gsettings set org.gnome.desktop.interface accent-color 'green' 2>/dev/null || true
   fi
 
-  # Power profile: performance (guarded to avoid noisy failures)
   if command -v powerprofilesctl >/dev/null 2>&1; then
     if powerprofilesctl list 2>/dev/null | grep -q "performance"; then
       powerprofilesctl set performance >/dev/null 2>&1 || true
@@ -450,8 +463,6 @@ ensure_gnome_extension_tools() {
   return 0
 }
 
-# Install a GNOME Shell extension by numeric ID from extensions.gnome.org
-# Prints the UUID on success.
 install_gnome_extension_by_id() {
   local ext_id="$1"
   local label="$2"
@@ -512,13 +523,11 @@ install_gnome_extension_by_id() {
     rm -f "$tmpfile"
   fi
 
-  # Make sure it's disabled until the very end of the installer
   if gnome-extensions info "$uuid" >/dev/null 2>&1; then
     gnome-extensions disable "$uuid" >/dev/null 2>&1 || true
     echo "[GNOME] ${label} installed as ${uuid} and kept DISABLED for now." >&2
   fi
 
-  # Emit uuid on stdout so caller can capture it
   printf '%s\n' "$uuid"
 }
 
@@ -530,15 +539,10 @@ configure_gnome_extensions_layout() {
     return
   fi
 
-  # 1) Install ArcMenu (ID 3628)
   ARCMENU_UUID="$(install_gnome_extension_by_id 3628 "ArcMenu" || true)"
-
-  # 2) Install App Icons Taskbar (ID 4944)
   TASKBAR_UUID="$(install_gnome_extension_by_id 4944 "App Icons Taskbar" || true)"
 
-  # 3) Apply GNOME extension configs from repo (remote via RAW_BASE)
   if command -v dconf >/dev/null 2>&1; then
-    # ArcMenu config → /org/gnome/shell/extensions/arcmenu/
     local arcmenu_tmp
     arcmenu_tmp="$(mktemp)"
     if curl -fsSL "$RAW_BASE/configs/arcmenu.conf" -o "$arcmenu_tmp"; then
@@ -549,7 +553,6 @@ configure_gnome_extensions_layout() {
     fi
     rm -f "$arcmenu_tmp"
 
-    # App Icons Taskbar config → /org/gnome/shell/extensions/aztaskbar/
     local taskbar_tmp
     taskbar_tmp="$(mktemp)"
     if curl -fsSL "$RAW_BASE/configs/app-icons-taskbar.conf" -o "$taskbar_tmp"; then
@@ -563,7 +566,6 @@ configure_gnome_extensions_layout() {
     echo "[GNOME] dconf not found; cannot apply extension configs." >&2
   fi
 
-  # 4) Fix ArcMenu icon mismatch: copy Taskbar.png as BenjiOS-Menu.png to icon theme path
   local icon_target="$HOME/.local/share/icons/hicolor/48x48/apps/BenjiOS-Menu.png"
   mkdir -p "$(dirname "$icon_target")"
   if curl -fsSL "$RAW_BASE/assets/Taskbar.png" -o "$icon_target"; then
@@ -582,29 +584,23 @@ configure_gnome_extensions_layout
 #--------------------------------------
 # Stack-specific system config
 #--------------------------------------
-
-# Gaming
 if has_stack "gaming"; then
   run_sudo systemctl enable --now gamemoded.service >/dev/null 2>&1 || true
 fi
 
-# Monitoring
 if has_stack "monitoring"; then
   run_sudo systemctl enable --now irqbalance >/dev/null 2>&1 || true
   run_sudo sensors-detect --auto >/dev/null 2>&1 || true
 fi
 
-# Management / Remote
 if has_stack "management"; then
   run_sudo systemctl enable --now ssh >/dev/null 2>&1 || true
   run_sudo systemctl enable --now xrdp >/dev/null 2>&1 || true
 
-  # Basic firewall rules
   run_sudo ufw allow 22/tcp >/dev/null 2>&1 || true
   run_sudo ufw allow 3389/tcp >/dev/null 2>&1 || true
   run_sudo ufw --force enable >/dev/null 2>&1 || true
 
-  # Keep network up on halt for WoL
   run_sudo bash -c '
     if [ -f /etc/default/halt ]; then
       if grep -q "^NETDOWN=" /etc/default/halt; then
@@ -617,7 +613,6 @@ if has_stack "management"; then
     fi
   ' >/dev/null 2>&1 || true
 
-  # If TLP exists, keep WOL on
   if [ -f /etc/default/tlp ]; then
     run_sudo bash -c '
       if grep -q "^WOL_DISABLE=" /etc/default/tlp; then
@@ -630,17 +625,17 @@ if has_stack "management"; then
 fi
 
 #--------------------------------------
-# rEFInd install + theme (BsxM1)
+# rEFInd install + theme (BsxM1) with mode
 #--------------------------------------
 install_and_configure_refind() {
-  # Require ESP mounted at /boot/efi
+  local mode="$1"
+
   local esp="/boot/efi"
   if ! mountpoint -q "$esp"; then
     echo "[rEFInd] /boot/efi not mounted – skipping rEFInd theme configuration."
     return
   fi
 
-  # Install rEFInd to ESP (if installer is present)
   if command -v refind-install >/dev/null 2>&1; then
     run_sudo refind-install || true
   fi
@@ -649,7 +644,6 @@ install_and_configure_refind() {
   run_sudo mkdir -p "$(dirname "$theme_dir")"
 
   if [ ! -d "$theme_dir" ]; then
-    # Clone BsxM1 theme
     run_sudo git clone --depth=1 https://github.com/AlexFullmoon/refind-bsxm1-theme.git "$theme_dir" || true
   fi
 
@@ -657,35 +651,79 @@ install_and_configure_refind() {
   local refind_conf="$refind_dir/refind.conf"
   run_sudo mkdir -p "$refind_dir"
 
-  # Prefer refind.conf from BenjiOS repo; otherwise use a safe fallback
   local tmp_conf
   tmp_conf="$(mktemp)"
 
-  if curl -fsSL "$RAW_BASE/refind/refind.conf" -o "$tmp_conf"; then
-    run_sudo cp "$tmp_conf" "$refind_conf"
-  else
-    cat > "$tmp_conf" << 'EOF'
+  cat > "$tmp_conf" << 'EOF_REF'
+# BenjiOS rEFInd configuration
+# Generated by BenjiOS-Installer.sh
+
 timeout 10
 use_nvram false
 resolution max
 
+# Mouse support
 enable_mouse
 mouse_size 16
 mouse_speed 6
 
-showtools
-dont_scan_files grubx64.efi,fwupx64.efi
+# Basic tools
+showtools shell, reboot, shutdown, firmware
 
+# Scan internal/external disks and optical; manual stanzas allowed.
+scanfor internal,external,optical,manual
+EOF_REF
+
+  case "$mode" in
+    single)
+      cat >> "$tmp_conf" << 'EOF_REF2'
+
+# Mode: Single Boot Ubuntu
+# Hide Windows boot entries (EFI/Microsoft).
+dont_scan_dirs EFI/Microsoft
+EOF_REF2
+      ;;
+    dual)
+      cat >> "$tmp_conf" << 'EOF_REF3'
+
+# Mode: Dual Boot Ubuntu + Windows
+# Hide helper/junk loaders, keep main Ubuntu + Windows entries.
+# - fwupx64.efi   -> firmware updater
+# - mmx64.efi     -> MOK manager
+# - grubx64.efi   -> GRUB shim which we don't want to list separately
+dont_scan_files fwupx64.efi,mmx64.efi,grubx64.efi
+EOF_REF3
+      ;;
+    all)
+      cat >> "$tmp_conf" << 'EOF_REF4'
+
+# Mode: Show all entries
+# No additional hiding.
+EOF_REF4
+      ;;
+    *)
+      cat >> "$tmp_conf" << 'EOF_REF5'
+
+# Mode: Dual Boot Ubuntu + Windows (fallback)
+dont_scan_files fwupx64.efi,mmx64.efi,grubx64.efi
+EOF_REF5
+      ;;
+  esac
+
+  cat >> "$tmp_conf" << 'EOF_REF6'
+
+# BenjiOS theme (BsxM1) – path relative to EFI/refind/
 include themes/refind-bsxm1-theme/theme.conf
-EOF
-    run_sudo cp "$tmp_conf" "$refind_conf"
-  fi
+EOF_REF6
 
+  run_sudo cp "$tmp_conf" "$refind_conf"
   rm -f "$tmp_conf"
+
+  echo "[rEFInd] Installed/updated with mode='${mode}' and BsxM1 theme enabled."
 }
 
 if $INSTALL_REFIND; then
-  install_and_configure_refind
+  install_and_configure_refind "$REFIND_BOOT_MODE"
 fi
 
 #--------------------------------------
@@ -695,24 +733,19 @@ zenity --info --title="BenjiOS Installer" \
   --width="$ZENITY_W" --height=200 \
   --text="Step 4: Running maintenance tasks (firmware, Flatpak, cleanup)…"
 
-# APT cleanup
 run_sudo_apt apt autoremove --purge -y || true
 run_sudo_apt apt clean || true
 
-# Flatpak cleanup
 if command -v flatpak >/dev/null 2>&1; then
   flatpak update -y || true
   flatpak uninstall --unused -y || true
 fi
 
-# Firmware updates (refresh metadata + list updates; actual flashing is up to the user)
 if command -v fwupdmgr >/dev/null 2>&1; then
   run_sudo fwupdmgr refresh --force >/dev/null 2>&1 || true
   run_sudo fwupdmgr get-updates >/dev/null 2>&1 || true
-  # You can run `sudo fwupdmgr update` manually later if desired.
 fi
 
-# Snap refresh (if snap exists)
 if command -v snap >/dev/null 2>&1; then
   run_sudo snap refresh >/dev/null 2>&1 || true
 fi
@@ -727,7 +760,7 @@ fi
 rm -f "$POST_DOC_TMP"
 
 #--------------------------------------
-# Enable GNOME layout extensions (ArcMenu + Taskbar)
+# Enable GNOME layout extensions at the very end
 #--------------------------------------
 enable_gnome_layout_extensions() {
   if ! command -v gnome-extensions >/dev/null 2>&1; then
@@ -749,11 +782,11 @@ enable_gnome_layout_extensions
 #--------------------------------------
 zenity --info --title="BenjiOS Installer" \
   --width="$ZENITY_W" --height=260 \
-  --text="BenjiOS setup is complete.\n\nArcMenu and App Icons Taskbar have been installed, configured, and ACTIVATED for the BenjiOS layout.\n\nA reboot is STRONGLY recommended so GNOME fully picks up the new panel configuration."
+  --text="BenjiOS setup is complete.\n\nArcMenu and App Icons Taskbar have been installed, configured, and ACTIVATED for the BenjiOS layout.\n\nrEFInd (if selected) was configured using the chosen boot mode and BsxM1 theme.\n\nA reboot is STRONGLY recommended so GNOME and rEFInd fully pick up the new configuration."
 
 if zenity --question --title="BenjiOS Installer" \
     --width="$ZENITY_W" --height=220 \
-    --text="Reboot now to finalize the BenjiOS layout (strongly recommended)?"; then
+    --text="Reboot now to finalize the BenjiOS layout and rEFInd configuration (strongly recommended)?"; then
   run_sudo reboot
 fi
 
