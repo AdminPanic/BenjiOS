@@ -19,10 +19,10 @@ if [ "$EUID" -eq 0 ]; then
 fi
 
 if ! command -v zenity >/dev/null 2>&1; then
-  echo "Zenity is required but not installed."
-  echo "Run: sudo apt update && sudo apt install -y zenity"
-  exit 1
+  echo "Zenity is not installed. Installing it now (this may ask for your sudo password in the terminal once)…"
+  sudo apt update && sudo apt install -y zenity
 fi
+
 
 mkdir -p "$DESKTOP_DIR"
 
