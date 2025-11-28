@@ -1,452 +1,551 @@
 #!/usr/bin/env bash
-# BenjiOS Installer - Ubuntu 25.10 (Questing Quokka)
-# Runs as normal user, uses zenity for a simple GUI front-end.
+set -e
 
-set -euo pipefail
+########################################
+# BenjiOS Installer
+# Target: Ubuntu 25.10+ (GNOME, Wayland)
+########################################
+
+RAW_BASE="https://raw.githubusercontent.com/AdminPanic/BenjiOS/main"
+DESKTOP_DIR="$HOME/Desktop"
+
+#-----------------------------
+# Basic sanity checks
+#-----------------------------
+
+if [ "$EUID" -eq 0 ]; then
+  echo "Please do NOT run this script as root. Run it as your normal user."
+  exit 1
+fi
+
+if ! command -v zenity >/dev/null 2>&1; then
+  echo "Zenity is required but not installed."
+  echo "Run: sudo apt update && sudo apt install -y zenity"
+  exit 1
+fi
+
+mkdir -p "$DESKTOP_DIR"
 
 export DEBIAN_FRONTEND=noninteractive
 
-RAW_BASE="https://raw.githubusercontent.com/AdminPanic/BenjiOS/main"
-
 #-----------------------------
-# Helper functions
+# License / EULA info
 #-----------------------------
 
-msg() { echo "==> $*"; }
+LICENSE_TEXT=$'BenjiOS Installer – License & EULA summary\n\n\
+This script will:\n\
+  • Install packages from Ubuntu repositories\n\
+  • Install applications from Flathub via Flatpak\n\
+  • Install Microsoft core fonts via ubuntu-restricted-extras\n\
+    (EULA accepted non-interactively via debconf preseed)\n\
+  • Optionally install rEFInd boot manager and configure a theme\n\n\
+By continuing, you agree to:\n\
+  • The Ubuntu / Canonical license terms\n\
+  • The Flathub / individual app license terms\n\
+  • The Microsoft core fonts EULA (if ubuntu-restricted-extras is installed)\n\n\
+No warranty. Use at your own risk.\n\n\
+Do you want to continue?'
 
-die() {
-  echo "ERROR: $*" >&2
+zenity --question \
+  --title="BenjiOS Installer – License" \
+  --width=500 \
+  --text="$LICENSE_TEXT" \
+  --ok-label="I Agree" \
+  --cancel-label="Cancel"
+
+if [ $? -ne 0 ]; then
+  zenity --info --title="BenjiOS Installer" --text="Installation cancelled."
+  exit 0
+fi
+
+#-----------------------------
+# Sudo via Zenity
+#-----------------------------
+
+SUDO_PASS="$(zenity --password --title='BenjiOS Installer – sudo access')"
+
+if [ -z "$SUDO_PASS" ]; then
+  zenity --error --title="BenjiOS Installer" --text="No password entered. Exiting."
   exit 1
+fi
+
+run_sudo() {
+  echo "$SUDO_PASS" | sudo -S "$@" >/dev/null
 }
 
-require_not_root() {
-  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-    die "Do NOT run this as root. Run it as your normal user."
-  fi
+# Test sudo
+if ! echo "$SUDO_PASS" | sudo -S -v >/dev/null 2>&1; then
+  zenity --error --title="BenjiOS Installer" --text="Incorrect sudo password. Exiting."
+  exit 1
+fi
+
+#-----------------------------
+# Detect AMD GPU (for AMD tweaks)
+#-----------------------------
+
+AMD_GPU_DETECTED=false
+if lspci | grep -E "VGA|3D" | grep -qi "AMD"; then
+  AMD_GPU_DETECTED=true
+fi
+
+if $AMD_GPU_DETECTED; then
+  AMD_DEFAULT="TRUE"
+else
+  AMD_DEFAULT="FALSE"
+fi
+
+#-----------------------------
+# Stack selection (Zenity checklist)
+#-----------------------------
+
+STACK_SELECTION=$(zenity --list \
+  --title="BenjiOS Installer – Component Selection" \
+  --width=700 --height=400 \
+  --text="Select which stacks to install.\n\nCore system tools are ALWAYS installed.\nYou can re-run this script later to add more stacks." \
+  --checklist \
+  --column="Install" --column="ID" --column="Description" \
+  TRUE  "office"        "Office, mail, basic media, RDP client" \
+  TRUE  "gaming"        "Gaming stack: Steam, Heroic, Lutris, Proton tools" \
+  TRUE  "monitoring"    "Monitoring: sensors, btop, nvtop, psensor, etc." \
+  TRUE  "backup_tools"  "Backup tools: Timeshift, Déjà Dup, Borg, Vorta" \
+  TRUE  "management"    "Remote management: SSH server, xRDP, firewall, WoL" \
+  TRUE  "auto_updates"  "Automatic APT updates (unattended-upgrades + cron-apt)" \
+  "$AMD_DEFAULT" "amd_tweaks" "AMD GPU tweaks (Mesa/Vulkan extras – only if AMD GPU detected)" \
+  FALSE "refind"        "rEFInd boot manager with BsxM1 theme (advanced multi-boot)" \
+) || true
+
+if [ -z "$STACK_SELECTION" ]; then
+  zenity --info --title="BenjiOS Installer" --text="No optional stacks selected. Core stack will still be installed."
+fi
+
+has_stack() {
+  case "$STACK_SELECTION" in
+    *"$1"*) return 0 ;;
+    *)      return 1 ;;
+  esac
 }
 
-ensure_zenity() {
-  if ! command -v zenity >/dev/null 2>&1; then
-    echo "Zenity not found. Installing zenity..."
-    sudo apt-get update -y
-    sudo apt-get install -y zenity
-  fi
+AUTO_UPDATES_SELECTED=false
+if has_stack "auto_updates"; then
+  AUTO_UPDATES_SELECTED=true
+fi
+
+# Auto updates – choose frequency, if selected
+UPDATES_DAYS=""
+if $AUTO_UPDATES_SELECTED; then
+  UPD_FREQ=$(zenity --list \
+    --title="BenjiOS – Auto Updates" \
+    --width=400 --height=200 \
+    --text="How often should automatic APT updates run?" \
+    --radiolist \
+    --column="Use" --column="ID" --column="Description" \
+    TRUE  "daily"   "Install updates every day" \
+    FALSE "weekly"  "Install updates once per week" \
+  ) || true
+
+  case "$UPD_FREQ" in
+    "daily")  UPDATES_DAYS="1" ;;
+    "weekly") UPDATES_DAYS="7" ;;
+    *)
+      # Default to daily if dialog cancelled
+      UPDATES_DAYS="1"
+      ;;
+  esac
+fi
+
+INSTALL_REFIND=false
+if has_stack "refind"; then
+  INSTALL_REFIND=true
+fi
+
+#-----------------------------
+# System update + multiarch
+#-----------------------------
+
+zenity --info --title="BenjiOS Installer" --text="Step 1: Updating system and enabling 32-bit architecture…"
+
+run_sudo apt update -y >/dev/null
+run_sudo dpkg --add-architecture i386 || true
+run_sudo apt update -y >/dev/null
+run_sudo apt full-upgrade -y >/dev/null
+
+# Preseed Microsoft fonts EULA before ubuntu-restricted-extras
+run_sudo apt install -y debconf-utils >/dev/null
+echo "$SUDO_PASS" | sudo -S bash -c "echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | debconf-set-selections" >/dev/null 2>&1 || true
+echo "$SUDO_PASS" | sudo -S bash -c "echo 'ttf-mscorefonts-installer msttcorefonts/present-mscorefonts-eula note' | debconf-set-selections" >/devnull 2>&1 || true
+
+#-----------------------------
+# Package aggregation
+#-----------------------------
+
+APT_PKGS=()
+add_apt() {
+  for pkg in "$@"; do
+    APT_PKGS+=("$pkg")
+  done
 }
 
-detect_amd_gpu() {
-  if lspci 2>/dev/null | grep -E "VGA|3D" | grep -qi "AMD"; then
-    echo "1"
-  else
-    echo "0"
-  fi
+FLATPAK_PKGS=()
+add_flatpak() {
+  for pkg in "$@"; do
+    FLATPAK_PKGS+=("$pkg")
+  done
 }
 
-preseed_ms_fonts_eula() {
-  # So ubuntu-restricted-extras can install non-interactively
-  msg "Pre-seeding Microsoft fonts EULA"
-  sudo apt-get install -y debconf-utils
-  echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | sudo debconf-set-selections || true
-  echo 'ttf-mscorefonts-installer msttcorefonts/present-mscorefonts-eula note'       | sudo debconf-set-selections || true
-}
+# Core stack (always)
+add_apt \
+  gnome-tweaks \
+  gvfs-backends \
+  nautilus-share \
+  bluez-obexd \
+  gnome-shell-extensions \
+  gir1.2-gmenu-3.0 \
+  gnome-menus \
+  power-profiles-daemon \
+  fwupd \
+  debconf-utils \
+  curl \
+  dconf-cli \
+  wget \
+  unzip \
+  software-properties-common \
+  nano \
+  git \
+  gnome-shell-extension-gsconnect \
+  gnome-software-plugin-flatpak \
+  flatpak
 
-update_and_upgrade() {
-  msg "Updating APT package lists"
-  sudo apt-get update -y
-  msg "Upgrading installed packages (full-upgrade)"
-  sudo apt-get full-upgrade -y
-}
+add_flatpak \
+  com.mattjakeman.ExtensionManager
 
-enable_i386() {
-  if ! dpkg --print-foreign-architectures | grep -q '^i386$'; then
-    msg "Enabling 32-bit (i386) architecture for gaming / Proton"
-    sudo dpkg --add-architecture i386
-    sudo apt-get update -y
-  fi
-}
-
-setup_flatpak() {
-  msg "Installing Flatpak + GNOME Software plugin"
-  sudo apt-get install -y flatpak gnome-software-plugin-flatpak
-
-  if ! flatpak remote-list | grep -q '^flathub'; then
-    msg "Adding Flathub Flatpak remote"
-    flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-  fi
-}
-
-install_base_packages() {
-  msg "Installing base desktop / system tools"
-  sudo apt-get install -y \
-    wget curl git \
-    dconf-cli \
-    software-properties-common \
-    fwupd \
-    gnome-shell-extensions \
-    gnome-shell-extension-manager \
-    gvfs-backends \
-    bluez-obexd \
-    power-profiles-daemon \
-    gnome-tweaks
-}
-
-install_core_desktop_stack() {
-  msg "Installing core desktop / productivity stack"
-  sudo apt-get install -y \
+# Office stack
+if has_stack "office"; then
+  add_apt \
+    openvpn \
     libreoffice \
     thunderbird \
-    remmina remmina-plugin-rdp remmina-plugin-secret \
-    openvpn \
     network-manager-openvpn-gnome \
     vlc \
     rhythmbox \
     ubuntu-restricted-extras \
-    nautilus-share \
-    gnome-shell-extension-gsconnect
-}
+    remmina \
+    remmina-plugin-rdp \
+    remmina-plugin-secret
 
-install_monitoring_stack() {
-  msg "Installing monitoring / sensors / fan tools"
-  sudo apt-get install -y \
+  add_flatpak \
+    org.keepassxc.KeePassXC \
+    com.github.qarmin.czkawka \
+    org.kde.digikam
+fi
+
+# Gaming stack
+if has_stack "gaming"; then
+  add_apt \
+    mesa-utils \
+    vulkan-tools \
+    gamemode \
+    mangohud \
+    lutris \
+    libxkbcommon-x11-0:i386 \
+    libvulkan1:i386 \
+    mesa-vulkan-drivers \
+    mesa-vulkan-drivers:i386
+
+  add_flatpak \
+    com.valvesoftware.Steam \
+    com.heroicgameslauncher.hgl \
+    net.davidotek.pupgui2 \
+    net.lutris.Lutris
+fi
+
+# Monitoring stack
+if has_stack "monitoring"; then
+  add_apt \
     lm-sensors \
     fancontrol \
     irqbalance \
     btop \
     nvtop \
     s-tui \
-    smartmontools
+    smartmontools \
+    radeontop \
+    htop \
+    glances \
+    psensor
+fi
 
-  msg "Enabling irqbalance service"
-  sudo systemctl enable --now irqbalance || true
-}
+# Backup tools stack
+if has_stack "backup_tools"; then
+  add_apt \
+    timeshift \
+    deja-dup \
+    borgbackup
 
-install_gaming_stack() {
-  msg "Installing gaming-related packages (APT)"
-  sudo apt-get install -y \
-    mesa-utils \
-    vulkan-tools \
-    gamemode \
-    mangohud \
-    libxkbcommon-x11-0:i386 \
-    libvulkan1:i386 \
-    mesa-vulkan-drivers \
-    mesa-vulkan-drivers:i386
+  add_flatpak \
+    com.borgbase.Vorta
+fi
 
-  msg "Installing gaming applications (Flatpak)"
-  flatpak install -y flathub \
-    com.valvesoftware.Steam \
-    com.heroicgameslauncher.hgl \
-    net.davidotek.pupgui2 \
-    net.lutris.Lutris || true
-}
+# Management (remote) stack
+if has_stack "management"; then
+  add_apt \
+    openssh-server \
+    ufw \
+    xrdp \
+    ethtool
+fi
 
-install_amd_tweaks() {
-  local IS_AMD_GPU="$1"
-  if [ "$IS_AMD_GPU" -ne 1 ]; then
-    msg "AMD GPU not detected; skipping AMD tweaks."
-    return 0
-  fi
+# Auto updates stack
+if $AUTO_UPDATES_SELECTED; then
+  add_apt \
+    unattended-upgrades \
+    cron-apt
+fi
 
-  msg "AMD GPU detected – installing safe AMD-related tools"
-  # radeontop is AMD-specific
-  if apt-cache show radeontop >/dev/null 2>&1; then
-    sudo apt-get install -y radeontop
-  fi
-
-  # We already installed mesa-vulkan-drivers above in gaming stack,
-  # but repeat here safely in case user skipped the gaming stack.
-  sudo apt-get install -y \
+# AMD tweaks stack (only if AMD GPU)
+if has_stack "amd_tweaks" && $AMD_GPU_DETECTED; then
+  add_apt \
+    radeontop \
     mesa-vulkan-drivers \
     mesa-vulkan-drivers:i386 \
     vulkan-tools \
     mesa-utils
-}
+fi
 
-install_refind_with_theme() {
-  msg "Installing rEFInd boot manager"
+# rEFInd stack
+if $INSTALL_REFIND; then
+  add_apt \
+    refind \
+    shim-signed \
+    mokutil
+fi
 
-  sudo apt-get install -y refind || {
-    msg "rEFInd package installation failed – skipping rEFInd configuration."
-    return 0
-  }
+#-----------------------------
+# Deduplicate and install APT packages
+#-----------------------------
 
-  # rEFInd config / theme only make sense on UEFI systems with /boot/efi mounted
-  if [ ! -d /boot/efi ] || ! mount | grep -q " /boot/efi "; then
-    msg "/boot/efi is not a mounted ESP – skipping rEFInd theming."
-    return 0
-  fi
+if [ "${#APT_PKGS[@]}" -gt 0 ]; then
+  zenity --info --title="BenjiOS Installer" --text="Step 2: Installing APT packages…"
 
-  local REFIND_DIR="/boot/efi/EFI/refind"
-  sudo mkdir -p "$REFIND_DIR"
+  declare -A SEEN
+  UNIQUE_PKGS=()
+  for pkg in "${APT_PKGS[@]}"; do
+    if [ -z "${SEEN[$pkg]+x}" ]; then
+      SEEN["$pkg"]=1
+      UNIQUE_PKGS+=("$pkg")
+    fi
+  done
 
-  # Theme directory (we assume your repo has refind/theme.conf + theme files if needed)
-  local THEME_DIR="$REFIND_DIR/themes/benjios-bsxm1"
-  sudo mkdir -p "$THEME_DIR"
+  # Install in one shot
+  echo "$SUDO_PASS" | sudo -S apt install -y "${UNIQUE_PKGS[@]}"
+fi
 
-  # Fetch theme.conf and refind.conf from repo if they exist there
-  msg "Downloading rEFInd theme + config from BenjiOS repo (if available)"
+#-----------------------------
+# Flatpak setup + apps
+#-----------------------------
 
-  # theme.conf (controls icons/background/fonts)
-  if curl -fsSL "$RAW_BASE/refind/theme.conf" >/dev/null 2>&1; then
-    curl -fsSL "$RAW_BASE/refind/theme.conf" | sudo tee "$THEME_DIR/theme.conf" >/dev/null
-  else
-    # Fallback minimal theme.conf (safe default)
-    sudo tee "$THEME_DIR/theme.conf" >/dev/null << 'EOF'
-# Minimal theme placeholder – customize in BenjiOS repo at refind/theme.conf
-icons_dir themes/benjios-bsxm1/icons
-banner themes/benjios-bsxm1/bg_black.png
-EOF
-  fi
+zenity --info --title="BenjiOS Installer" --text="Step 3: Configuring Flatpak and installing apps…"
 
-  # refind.conf (main config)
-  if curl -fsSL "$RAW_BASE/refind/refind.conf" >/dev/null 2>&1; then
-    curl -fsSL "$RAW_BASE/refind/refind.conf" | sudo tee "$REFIND_DIR/refind.conf" >/dev/null
-  else
-    # Safe fallback refind.conf (no aggressive hiding)
-    sudo tee "$REFIND_DIR/refind.conf" >/dev/null << 'EOF'
-timeout 10
-use_nvram false
-resolution max
+# Ensure Flathub remote
+flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true
 
-# Mouse
-enable_mouse
-mouse_size 16
-mouse_speed 6
+if [ "${#FLATPAK_PKGS[@]}" -gt 0 ]; then
+  flatpak install -y flathub "${FLATPAK_PKGS[@]}" || true
+fi
 
-# Clean tools row
-showtools
+#-----------------------------
+# Stack-specific config
+#-----------------------------
 
-# Example: avoid duplicate grub/fwupd entries
-dont_scan_files grubx64.efi,fwupx64.efi
+# Gaming: enable gamemoded service
+if has_stack "gaming"; then
+  echo "$SUDO_PASS" | sudo -S systemctl enable --now gamemoded >/dev/null 2>&1 || true
+fi
 
-# Load BenjiOS theme (BsxM1-based)
-include themes/benjios-bsxm1/theme.conf
-EOF
-  fi
+# Monitoring: enable irqbalance + sensors-detect --auto
+if has_stack "monitoring"; then
+  echo "$SUDO_PASS" | sudo -S systemctl enable --now irqbalance >/dev/null 2>&1 || true
+  echo "$SUDO_PASS" | sudo -S sensors-detect --auto >/dev/null 2>&1 || true
+fi
 
-  msg "rEFInd installed; theme + config written to $REFIND_DIR"
-  msg "IMPORTANT: On next reboot, enroll the MOK if asked so rEFInd can load with Secure Boot."
-}
+# Management: SSH, xRDP, UFW, WOL
+if has_stack "management"; then
+  # Enable services
+  echo "$SUDO_PASS" | sudo -S systemctl enable --now ssh >/dev/null 2>&1 || true
+  echo "$SUDO_PASS" | sudo -S systemctl enable --now xrdp >/dev/null 2>&1 || true
 
-apply_gnome_appearance() {
-  msg "Setting GNOME dark mode, green accent, and performance power profile"
+  # UFW rules
+  echo "$SUDO_PASS" | sudo -S ufw allow 22/tcp >/dev/null 2>&1 || true
+  echo "$SUDO_PASS" | sudo -S ufw allow 3389/tcp >/dev/null 2>&1 || true
+  echo "$SUDO_PASS" | sudo -S ufw --force enable >/dev/null 2>&1 || true
 
-  # Dark mode preference
-  gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' || true
-  gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-dark' || true
-
-  # Accent color: green (Ubuntu 25.x)
-  gsettings set org.gnome.desktop.interface accent-color 'green' || true
-
-  # Performance power profile
-  if command -v powerprofilesctl >/dev/null 2>&1; then
-    powerprofilesctl set performance || true
-  fi
-}
-
-update_flatpaks_and_firmware() {
-  msg "Updating Flatpak apps (if any)"
-  flatpak update -y || true
-
-  if command -v fwupdmgr >/dev/null 2>&1; then
-    msg "Checking firmware updates via fwupd"
-    sudo fwupdmgr refresh --force || true
-    sudo fwupdmgr get-updates || true
-    sudo fwupdmgr update -y || true
-  fi
-}
-
-cleanup_system() {
-  msg "Running APT autoremove/autoclean to tidy up"
-  sudo apt-get autoremove -y || true
-  sudo apt-get autoclean -y || true
-}
-
-write_post_install_notes() {
-  local DESKTOP_DIR="$HOME/Desktop"
-  mkdir -p "$DESKTOP_DIR"
-
-  cat > "$DESKTOP_DIR/POST_INSTALL_BENJIOS.txt" << 'EOF'
-BenjiOS – Post Install Notes (Ubuntu 25.10)
-==========================================
-This system was prepared by the BenjiOS Installer script.
-
-What was done (if you selected the options in the installer):
-------------------------------------------------------------
-- System packages updated via: apt full-upgrade
-- 32bit (i386) architecture enabled (for gaming / Proton / Wine)
-- Flatpak + Flathub configured
-- Base system tools installed (GNOME Tweaks, fwupd, GVFS, etc.)
-- Optional stacks:
-    * Core desktop tools (LibreOffice, Thunderbird, Remmina RDP, OpenVPN, VLC, Rhythmbox, GSConnect)
-    * Monitoring stack (lm-sensors, fancontrol, btop, nvtop, s-tui, smartmontools, irqbalance)
-    * Gaming stack (mesa-utils, vulkan-tools, gamemode, mangohud, Steam, Heroic, ProtonUp-Qt, Lutris)
-    * AMD tweaks (safe AMD GPU extras: mesa-vulkan-drivers, etc., if AMD GPU present)
-    * rEFInd + theme (if selected and /boot/efi is mounted)
-
-After reboot – things you may want to check:
---------------------------------------------
-1. Login session:
-   - At the login screen, pick "Ubuntu (Wayland)" for best VRR / modern GNOME behavior.
-
-2. Displays:
-   - Settings → Displays:
-     * Set your gaming monitor as "Primary"
-     * Set resolution/refresh (e.g. 2560×1440 @ 100 Hz)
-     * Enable VRR if offered by the UI
-
-3. GNOME Extensions:
-   - The script installed the "Extensions" app and "Extension Manager".
-   - Use them to install:
-       * ArcMenu (Windows-like start menu)
-       * App Icons Taskbar or similar (for taskbar-like behavior)
-   - You can customize them to your taste using their GUI settings.
-
-4. Backups (if you install Timeshift / Déjà Dup / Vorta later):
-   - Timeshift for system snapshots
-   - Déjà Dup ("Backups" app) for home backups
-   - Vorta + Borg for more advanced backups
-
-5. rEFInd (if enabled in the installer):
-   - On next reboot, if Secure Boot asks to enroll a key:
-       * Choose "Enroll MOK"
-       * Select the key
-       * Reboot again
-   - After that you should see rEFInd with the BenjiOS theme.
-
-6. Updates:
-   - APT:   sudo apt update && sudo apt full-upgrade
-   - Flatpak: flatpak update
-   - Firmware: sudo fwupdmgr get-updates && sudo fwupdmgr update
-
-EOF
-}
-
-prompt_reboot() {
-  if command -v zenity >/dev/null 2>&1; then
-    if zenity --question --title="BenjiOS Installer" \
-      --text="BenjiOS setup is complete.\n\nReboot now to apply all changes?" \
-      --width=400; then
-      msg "Rebooting..."
-      systemctl reboot || sudo reboot
+  # NETDOWN=no
+  echo "$SUDO_PASS" | sudo -S bash -c 'if [ -f /etc/default/halt ]; then
+    if grep -q "^NETDOWN=" /etc/default/halt; then
+      sed -i "s/^NETDOWN=.*/NETDOWN=no/" /etc/default/halt
     else
-      msg "No reboot requested. You can reboot later."
+      echo "NETDOWN=no" >> /etc/default/halt
     fi
   else
-    read -r -p "Reboot now to apply all changes? [y/N]: " REPLY
-    case "${REPLY,,}" in
-      y|yes)
-        msg "Rebooting..."
-        sudo reboot
-        ;;
-      *)
-        msg "No reboot requested. You can reboot later."
-        ;;
-    esac
+    echo "NETDOWN=no" > /etc/default/halt
+  fi' >/dev/null 2>&1 || true
+
+  # TLP keep WOL if present
+  echo "$SUDO_PASS" | sudo -S bash -c 'if [ -f /etc/default/tlp ]; then
+    if grep -q "^WOL_DISABLE=" /etc/default/tlp; then
+      sed -i "s/^WOL_DISABLE=.*/WOL_DISABLE=N/" /etc/default/tlp
+    else
+      echo "WOL_DISABLE=N" >> /etc/default/tlp
+    fi
+  fi' >/dev/null 2>&1 || true
+
+  # Enable WoL via ethtool
+  if command -v ethtool >/dev/null 2>&1; then
+    for iface_path in /sys/class/net/*; do
+      iface="$(basename "$iface_path")"
+      case "$iface" in
+        lo*|vbox*|docker*|virbr*|veth*|br-*|vmnet*)
+          continue
+          ;;
+      esac
+      echo "$SUDO_PASS" | sudo -S ethtool -s "$iface" wol g >/dev/null 2>&1 || true
+    done
   fi
-}
+
+  # Enable WoL via NetworkManager (nmcli)
+  if command -v nmcli >/dev/null 2>&1; then
+    while IFS=: read -r uuid type; do
+      [ "$type" = "802-3-ethernet" ] || continue
+      echo "$SUDO_PASS" | sudo -S nmcli connection modify "$uuid" 802-3-ethernet.wake-on-lan magic >/dev/null 2>&1 || true
+    done < <(nmcli -t -f UUID,TYPE connection show 2>/dev/null || true)
+  fi
+fi
+
+# Auto updates: unattended-upgrades + cron-apt config
+if $AUTO_UPDATES_SELECTED && [ -n "$UPDATES_DAYS" ]; then
+  echo "$SUDO_PASS" | sudo -S dpkg-reconfigure -f noninteractive unattended-upgrades >/dev/null 2>&1 || true
+
+  echo "$SUDO_PASS" | sudo -S bash -c "cat > /etc/apt/apt.conf.d/20auto-upgrades <<EOF
+APT::Periodic::Update-Package-Lists \"$UPDATES_DAYS\";
+APT::Periodic::Download-Upgradeable-Packages \"$UPDATES_DAYS\";
+APT::Periodic::Unattended-Upgrade \"$UPDATES_DAYS\";
+EOF" >/dev/null 2>&1 || true
+fi
 
 #-----------------------------
-# MAIN
+# rEFInd installation + theme
 #-----------------------------
 
-require_not_root
-ensure_zenity
+if $INSTALL_REFIND; then
+  zenity --info --title="BenjiOS Installer – rEFInd" --text="Installing rEFInd boot manager and theme…"
 
-IS_AMD_GPU=$(detect_amd_gpu)
+  # Install rEFInd (uses distribution defaults)
+  echo "$SUDO_PASS" | sudo -S refind-install >/dev/null 2>&1 || true
 
-# License / info dialog
+  ESP="/boot/efi"
+  REFIND_DIR="$ESP/EFI/refind"
+  THEME_DIR="$REFIND_DIR/themes/refind-bsxm1-theme"
+
+  if [ -d "$ESP/EFI" ]; then
+    # Clone theme from upstream repo
+    echo "$SUDO_PASS" | sudo -S rm -rf "$THEME_DIR" >/dev/null 2>&1 || true
+    echo "$SUDO_PASS" | sudo -S mkdir -p "$THEME_DIR" >/dev/null 2>&1 || true
+    echo "$SUDO_PASS" | sudo -S git clone https://github.com/AlexFullmoon/refind-bsxm1-theme.git "$THEME_DIR" >/dev/null 2>&1 || true
+
+    # Use your refind.conf from repo if available
+    TMP_REFIND_CONF="/tmp/benjios-refind.conf"
+    if curl -fsSL "$RAW_BASE/refind/refind.conf" -o "$TMP_REFIND_CONF"; then
+      echo "$SUDO_PASS" | sudo -S cp "$TMP_REFIND_CONF" "$REFIND_DIR/refind.conf" >/dev/null 2>&1 || true
+    fi
+  fi
+fi
+
+#-----------------------------
+# ArcMenu + App Icons Taskbar dconf + icon
+#-----------------------------
+
+zenity --info --title="BenjiOS Installer" --text="Applying ArcMenu and App Icons Taskbar configuration (if installed later)…"
+
+ICON_TARGET_DIR="$HOME/.local/share/icons/hicolor/48x48/apps"
+mkdir -p "$ICON_TARGET_DIR"
+
+if curl -fsSL "$RAW_BASE/assets/Taskbar.png" -o "$ICON_TARGET_DIR/Menu_Icon.png"; then
+  echo "Installed custom ArcMenu icon as Menu_Icon.png"
+fi
+
+# ArcMenu dconf
+ARC_CONF_TMP="/tmp/arcmenu.conf"
+if curl -fsSL "$RAW_BASE/configs/arcmenu.conf" -o "$ARC_CONF_TMP"; then
+  if [ -s "$ARC_CONF_TMP" ]; then
+    dconf load /org/gnome/shell/extensions/arcmenu/ < "$ARC_CONF_TMP" || true
+  fi
+fi
+
+# App Icons Taskbar dconf
+AZTASKBAR_CONF_TMP="/tmp/app-icons-taskbar.conf"
+if curl -fsSL "$RAW_BASE/configs/app-icons-taskbar.conf" -o "$AZTASKBAR_CONF_TMP"; then
+  if [ -s "$AZTASKBAR_CONF_TMP" ]; then
+    dconf load /org/gnome/shell/extensions/aztaskbar/ < "$AZTASKBAR_CONF_TMP" || true
+  fi
+fi
+
+#-----------------------------
+# GNOME appearance & power profile
+#-----------------------------
+
+gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' || true
+gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-dark' || true
+gsettings set org.gnome.desktop.interface accent-color 'green' || true
+
+if command -v powerprofilesctl >/dev/null 2>&1; then
+  powerprofilesctl set performance || true
+fi
+
+#-----------------------------
+# Extra updates, firmware, cleanup
+#-----------------------------
+
+zenity --info --title="BenjiOS Installer" --text="Finalizing: updating Flatpak, firmware, and cleaning up…"
+
+flatpak update -y || true
+flatpak remove --unused -y || true
+
+if command -v fwupdmgr >/dev/null 2>&1; then
+  echo "$SUDO_PASS" | sudo -S fwupdmgr refresh --force >/dev/null 2>&1 || true
+  echo "$SUDO_PASS" | sudo -S fwupdmgr get-updates >/dev/null 2>&1 || true
+  echo "$SUDO_PASS" | sudo -S fwupdmgr update -y >/devnull 2>&1 || true
+fi
+
+if command -v snap >/dev/null 2>&1; then
+  echo "$SUDO_PASS" | sudo -S snap refresh >/dev/null 2>&1 || true
+fi
+
+echo "$SUDO_PASS" | sudo -S apt autoremove --purge -y >/dev/null 2>&1 || true
+echo "$SUDO_PASS" | sudo -S apt clean >/dev/null 2>&1 || true
+
+#-----------------------------
+# Post-install guide (ODT) from repo
+#-----------------------------
+
+POST_DOC_NAME="BenjiOS-PostInstall.odt"
+if curl -fsSL "$RAW_BASE/docs/$POST_DOC_NAME" -o "$DESKTOP_DIR/$POST_DOC_NAME"; then
+  echo "Post-install guide saved as $DESKTOP_DIR/$POST_DOC_NAME"
+fi
+
+#-----------------------------
+# Final summary + reboot prompt
+#-----------------------------
+
 zenity --question \
-  --title="BenjiOS Installer for Ubuntu 25.10" \
-  --width=520 \
-  --ok-label="I Agree" \
-  --cancel-label="Cancel" \
-  --text=$'This script will:\n\n- Update your Ubuntu 25.10 system\n- Install selected software stacks (gaming, tools, monitoring)\n- Optionally install rEFInd boot manager + theme\n- Apply some GNOME appearance tweaks\n\nIt uses official Ubuntu repos + Flathub.\n\nBy continuing, you agree that you are responsible for your system,\nespecially when dual-booting or modifying boot loaders.\n\nProceed?' \
-  || exit 1
+  --title="BenjiOS Installer – Finished" \
+  --width=400 \
+  --text="BenjiOS installation and configuration is complete.\n\nA reboot is recommended to apply all changes.\n\nReboot now?" \
+  --ok-label="Reboot now" \
+  --cancel-label="Later"
 
-# Zenity checklist for options
-AMD_DESC="AMD GPU tweaks (safe extras)"
-if [ "$IS_AMD_GPU" -eq 0 ]; then
-  AMD_DESC="$AMD_DESC – AMD GPU NOT detected (this option will do nothing)."
+if [ $? -eq 0 ]; then
+  echo "$SUDO_PASS" | sudo -S reboot
+else
+  zenity --info --title="BenjiOS Installer" --text="You can reboot later. Check your Desktop for BenjiOS-PostInstall.odt for next steps."
 fi
 
-SELECTIONS=$(zenity --list \
-  --title="BenjiOS – Choose what to install" \
-  --width=650 --height=380 \
-  --text="Select the components you want to install.\n\nYou can re-run the script later with different choices." \
-  --checklist \
-  --column="Select" --column="ID" --column="Description" \
-  TRUE  "core"     "Core desktop tools (Office, Mail, RDP, VPN, media, GSConnect)" \
-  TRUE  "monitor"  "Monitoring stack (sensors, btop, nvtop, s-tui, smartmontools)" \
-  TRUE  "gaming"   "Gaming stack (Steam, Heroic, Lutris, ProtonUp-Qt, Gamemode, MangoHud)" \
-  TRUE  "amd"      "$AMD_DESC" \
-  FALSE "refind"   "Install rEFInd boot manager + BenjiOS theme (UEFI only)" \
-  || true)
-
-HAS_CORE=0
-HAS_MONITOR=0
-HAS_GAMING=0
-HAS_AMD=0
-HAS_REFIND=0
-
-case "$SELECTIONS" in
-  *core*)    HAS_CORE=1 ;;
-esac
-case "$SELECTIONS" in
-  *monitor*) HAS_MONITOR=1 ;;
-esac
-case "$SELECTIONS" in
-  *gaming*)  HAS_GAMING=1 ;;
-esac
-case "$SELECTIONS" in
-  *amd*)     HAS_AMD=1 ;;
-esac
-case "$SELECTIONS" in
-  *refind*)  HAS_REFIND=1 ;;
-esac
-
-msg "Selections:"
-msg "  Core desktop stack:      $HAS_CORE"
-msg "  Monitoring stack:        $HAS_MONITOR"
-msg "  Gaming stack:            $HAS_GAMING"
-msg "  AMD tweaks:              $HAS_AMD (AMD GPU detected: $IS_AMD_GPU)"
-msg "  rEFInd + theme:          $HAS_REFIND"
-
-# Actual work
-preseed_ms_fonts_eula
-update_and_upgrade
-enable_i386
-install_base_packages
-setup_flatpak
-
-if [ "$HAS_CORE" -eq 1 ]; then
-  install_core_desktop_stack
-fi
-
-if [ "$HAS_MONITOR" -eq 1 ]; then
-  install_monitoring_stack
-fi
-
-if [ "$HAS_GAMING" -eq 1 ]; then
-  install_gaming_stack
-fi
-
-if [ "$HAS_AMD" -eq 1 ]; then
-  install_amd_tweaks "$IS_AMD_GPU"
-fi
-
-if [ "$HAS_REFIND" -eq 1 ]; then
-  install_refind_with_theme
-fi
-
-apply_gnome_appearance
-update_flatpaks_and_firmware
-cleanup_system
-write_post_install_notes
-
-msg "=========================================="
-msg "  BenjiOS Installer – setup complete"
-msg "=========================================="
-msg "A summary / checklist was written to:"
-msg "  $HOME/Desktop/POST_INSTALL_BENJIOS.txt"
-
-prompt_reboot
+exit 0
