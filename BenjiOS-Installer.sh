@@ -4,11 +4,17 @@ set -e
 ########################################
 # BenjiOS Installer v2
 # Target: Ubuntu 25.10+ (GNOME, Wayland)
-# Fixes:
-#  - rEFInd theme reliability (BsxM1 theme, correct include, fallbacks)
-#  - ArcMenu icon path mismatch (Taskbar.png -> BenjiOS-Menu.png)
-#  - Proper /etc/apt/apt.conf.d/20auto-upgrades generation
-#  - Safer powerprofilesctl usage (no noisy errors on unsupported systems)
+#
+# Key features:
+#  - Curated stacks (office, gaming, monitoring, backup, management, auto_updates, amd_tweaks, refind)
+#  - Flatpak + Flathub setup
+#  - rEFInd with BsxM1 theme
+#  - GNOME dark theme + BenjiOS layout
+#  - ArcMenu + App Icons Taskbar:
+#       * Installed from extensions.gnome.org
+#       * Config seeded from repo
+#       * Auto-enabled at the END of the installer
+#       * Reboot STRONGLY recommended afterwards
 ########################################
 
 RAW_BASE="https://raw.githubusercontent.com/AdminPanic/BenjiOS/main"
@@ -16,6 +22,10 @@ DESKTOP_DIR="$HOME/Desktop"
 
 ZENITY_W=640
 ZENITY_H=480
+
+# Will be filled when we install GNOME extensions
+ARCMENU_UUID=""
+TASKBAR_UUID=""
 
 #--------------------------------------
 # Basic sanity
@@ -220,6 +230,7 @@ add_apt \
   power-profiles-daemon \
   fwupd \
   curl \
+  jq \
   dconf-cli \
   wget \
   unzip \
@@ -421,37 +432,149 @@ configure_gnome_look_and_power() {
 configure_gnome_look_and_power
 
 #--------------------------------------
-# Helper: GNOME extensions config (ArcMenu + App Icons Taskbar)
+# Helpers: GNOME extensions (ArcMenu + App Icons Taskbar)
 #--------------------------------------
+ensure_gnome_extension_tools() {
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "[GNOME] curl not found; cannot install extensions." >&2
+    return 1
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "[GNOME] jq not found; cannot install extensions." >&2
+    return 1
+  fi
+  if ! command -v gnome-extensions >/dev/null 2>&1; then
+    echo "[GNOME] gnome-extensions CLI not found; cannot install extensions." >&2
+    return 1
+  fi
+  return 0
+}
+
+# Install a GNOME Shell extension by numeric ID from extensions.gnome.org
+# Prints the UUID on success.
+install_gnome_extension_by_id() {
+  local ext_id="$1"
+  local label="$2"
+
+  if ! command -v gnome-extensions >/dev/null 2>&1; then
+    echo "[GNOME] gnome-extensions CLI missing; cannot install ${label}." >&2
+    return 1
+  fi
+
+  local shell_ver=""
+  if command -v gnome-shell >/dev/null 2>&1; then
+    shell_ver="$(gnome-shell --version | awk '{print $3}' | cut -d. -f1)"
+  fi
+
+  local url="https://extensions.gnome.org/extension-info/?pk=${ext_id}"
+  if [ -n "$shell_ver" ]; then
+    url="${url}&shell_version=${shell_ver}"
+  fi
+
+  local json uuid download_url
+  if ! json="$(curl -fsSL "$url")"; then
+    echo "[GNOME] ERROR: Failed to fetch metadata for ${label} (ID ${ext_id})." >&2
+    return 1
+  fi
+
+  uuid="$(printf '%s\n' "$json" | jq -r '.uuid')"
+  download_url="$(printf '%s\n' "$json" | jq -r '.download_url')"
+
+  if [ -z "$uuid" ] || [ "$uuid" = "null" ] || \
+     [ -z "$download_url" ] || [ "$download_url" = "null" ]; then
+    echo "[GNOME] ERROR: Missing uuid/download_url in metadata for ${label}." >&2
+    return 1
+  fi
+
+  if gnome-extensions list | grep -Fxq "$uuid"; then
+    echo "[GNOME] ${label} already installed as ${uuid}, skipping download." >&2
+  else
+    echo "[GNOME] Downloading ${label} (${uuid}) from extensions.gnome.org…" >&2
+    local tmpfile
+    tmpfile="$(mktemp)" || {
+      echo "[GNOME] ERROR: mktemp failed for ${label}." >&2
+      return 1
+    }
+
+    if ! curl -fsSL "https://extensions.gnome.org${download_url}" -o "$tmpfile"; then
+      echo "[GNOME] ERROR: Failed to download ${label} payload." >&2
+      rm -f "$tmpfile"
+      return 1
+    fi
+
+    echo "[GNOME] Installing ${label} via gnome-extensions…" >&2
+    if ! gnome-extensions install --force "$tmpfile"; then
+      echo "[GNOME] ERROR: gnome-extensions install failed for ${label}." >&2
+      rm -f "$tmpfile"
+      return 1
+    fi
+
+    rm -f "$tmpfile"
+  fi
+
+  # Make sure it's disabled until the very end of the installer
+  if gnome-extensions info "$uuid" >/dev/null 2>&1; then
+    gnome-extensions disable "$uuid" >/dev/null 2>&1 || true
+    echo "[GNOME] ${label} installed as ${uuid} and kept DISABLED for now." >&2
+  fi
+
+  # Emit uuid on stdout so caller can capture it
+  printf '%s\n' "$uuid"
+}
+
 configure_gnome_extensions_layout() {
-  if ! command -v dconf >/dev/null 2>&1; then
+  echo "[GNOME] === Configuring GNOME Shell extensions (ArcMenu + App Icons Taskbar) ==="
+
+  if ! ensure_gnome_extension_tools; then
+    echo "[GNOME] Skipping GNOME extension installation due to missing tools." >&2
     return
   fi
 
-  # ArcMenu dconf import
-  local arcmenu_tmp
-  arcmenu_tmp="$(mktemp)"
-  if curl -fsSL "$RAW_BASE/configs/arcmenu.conf" -o "$arcmenu_tmp"; then
-    dconf load /org/gnome/shell/extensions/arcmenu/ < "$arcmenu_tmp" 2>/dev/null || true
-  fi
-  rm -f "$arcmenu_tmp"
+  # 1) Install ArcMenu (ID 3628)
+  ARCMENU_UUID="$(install_gnome_extension_by_id 3628 "ArcMenu" || true)"
 
-  # App Icons Taskbar dconf import
-  local taskbar_tmp
-  taskbar_tmp="$(mktemp)"
-  if curl -fsSL "$RAW_BASE/configs/app-icons-taskbar.conf" -o "$taskbar_tmp"; then
-    dconf load /org/gnome/shell/extensions/aztaskbar/ < "$taskbar_tmp" 2>/dev/null || true
-  fi
-  rm -f "$taskbar_tmp"
+  # 2) Install App Icons Taskbar (ID 4944)
+  TASKBAR_UUID="$(install_gnome_extension_by_id 4944 "App Icons Taskbar" || true)"
 
-  # Fix ArcMenu icon mismatch: copy Taskbar.png as BenjiOS-Menu.png to icon theme path
+  # 3) Apply GNOME extension configs from repo (remote via RAW_BASE)
+  if command -v dconf >/dev/null 2>&1; then
+    # ArcMenu config → /org/gnome/shell/extensions/arcmenu/
+    local arcmenu_tmp
+    arcmenu_tmp="$(mktemp)"
+    if curl -fsSL "$RAW_BASE/configs/arcmenu.conf" -o "$arcmenu_tmp"; then
+      dconf load /org/gnome/shell/extensions/arcmenu/ < "$arcmenu_tmp" 2>/dev/null || \
+        echo "[GNOME] WARNING: Failed to load ArcMenu dconf." >&2
+    else
+      echo "[GNOME] NOTE: Could not fetch arcmenu.conf; skipping ArcMenu config." >&2
+    fi
+    rm -f "$arcmenu_tmp"
+
+    # App Icons Taskbar config → /org/gnome/shell/extensions/aztaskbar/
+    local taskbar_tmp
+    taskbar_tmp="$(mktemp)"
+    if curl -fsSL "$RAW_BASE/configs/app-icons-taskbar.conf" -o "$taskbar_tmp"; then
+      dconf load /org/gnome/shell/extensions/aztaskbar/ < "$taskbar_tmp" 2>/dev/null || \
+        echo "[GNOME] WARNING: Failed to load App Icons Taskbar dconf." >&2
+    else
+      echo "[GNOME] NOTE: Could not fetch app-icons-taskbar.conf; skipping Taskbar config." >&2
+    fi
+    rm -f "$taskbar_tmp"
+  else
+    echo "[GNOME] dconf not found; cannot apply extension configs." >&2
+  fi
+
+  # 4) Fix ArcMenu icon mismatch: copy Taskbar.png as BenjiOS-Menu.png to icon theme path
   local icon_target="$HOME/.local/share/icons/hicolor/48x48/apps/BenjiOS-Menu.png"
   mkdir -p "$(dirname "$icon_target")"
   if curl -fsSL "$RAW_BASE/assets/Taskbar.png" -o "$icon_target"; then
     if command -v gtk-update-icon-cache >/dev/null 2>&1; then
       gtk-update-icon-cache "$HOME/.local/share/icons/hicolor" >/dev/null 2>&1 || true
     fi
+  else
+    echo "[GNOME] NOTE: Could not fetch Taskbar.png; ArcMenu icon may fall back to default." >&2
   fi
+
+  echo "[GNOME] ArcMenu and App Icons Taskbar are installed, configured, and currently DISABLED."
 }
 
 configure_gnome_extensions_layout
@@ -513,7 +636,7 @@ install_and_configure_refind() {
   # Require ESP mounted at /boot/efi
   local esp="/boot/efi"
   if ! mountpoint -q "$esp"; then
-    echo "[BenjiOS] /boot/efi not mounted – skipping rEFInd theme configuration."
+    echo "[rEFInd] /boot/efi not mounted – skipping rEFInd theme configuration."
     return
   fi
 
@@ -604,15 +727,33 @@ fi
 rm -f "$POST_DOC_TMP"
 
 #--------------------------------------
+# Enable GNOME layout extensions (ArcMenu + Taskbar)
+#--------------------------------------
+enable_gnome_layout_extensions() {
+  if ! command -v gnome-extensions >/dev/null 2>&1; then
+    return
+  fi
+
+  if [ -n "$ARCMENU_UUID" ]; then
+    gnome-extensions enable "$ARCMENU_UUID" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$TASKBAR_UUID" ]; then
+    gnome-extensions enable "$TASKBAR_UUID" >/dev/null 2>&1 || true
+  fi
+}
+
+enable_gnome_layout_extensions
+
+#--------------------------------------
 # Done
 #--------------------------------------
 zenity --info --title="BenjiOS Installer" \
-  --width="$ZENITY_W" --height=220 \
-  --text="BenjiOS setup is complete.\n\nYou can find a post-install guide on your Desktop.\n\nConsider rebooting to apply all changes (especially rEFInd / firmware)."
+  --width="$ZENITY_W" --height=260 \
+  --text="BenjiOS setup is complete.\n\nArcMenu and App Icons Taskbar have been installed, configured, and ACTIVATED for the BenjiOS layout.\n\nA reboot is STRONGLY recommended so GNOME fully picks up the new panel configuration."
 
 if zenity --question --title="BenjiOS Installer" \
-    --width="$ZENITY_W" --height=200 \
-    --text="Reboot now?"; then
+    --width="$ZENITY_W" --height=220 \
+    --text="Reboot now to finalize the BenjiOS layout (strongly recommended)?"; then
   run_sudo reboot
 fi
 
