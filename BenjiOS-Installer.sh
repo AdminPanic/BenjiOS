@@ -707,7 +707,6 @@ scanfor manual
 default_selection "Ubuntu (BenjiOS)"
 
 menuentry "Ubuntu (BenjiOS)" {
-    icon /EFI/refind/icons/os_ubuntu.png
     loader \EFI\ubuntu\shimx64.efi
 }
 EOF_SINGLE
@@ -722,12 +721,10 @@ scanfor manual
 default_selection "Ubuntu (BenjiOS)"
 
 menuentry "Ubuntu (BenjiOS)" {
-    icon /EFI/refind/icons/os_ubuntu.png
     loader \EFI\ubuntu\shimx64.efi
 }
 
 menuentry "Windows" {
-    icon /EFI/refind/icons/os_win8.png
     loader \EFI\Microsoft\Boot\bootmgfw.efi
 }
 EOF_DUAL
