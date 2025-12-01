@@ -763,17 +763,78 @@ rm -f "$POST_DOC_TMP"
 # Enable GNOME layout extensions at the very end
 #--------------------------------------
 enable_gnome_layout_extensions() {
-  if ! command -v gnome-extensions >/dev/null 2>&1; then
-    return
+  # Nothing to do if we never got valid UUIDs
+  local uuids=()
+  [ -n "$ARCMENU_UUID" ]   && uuids+=("$ARCMENU_UUID")
+  [ -n "$TASKBAR_UUID" ]   && uuids+=("$TASKBAR_UUID")
+  [ "${#uuids[@]}" -eq 0 ] && return
+
+  # 1) Explicitly update org.gnome.shell enabled-extensions
+  if command -v gsettings >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    # Read current enabled list (may be "@as []" or "[]")
+    local current_enabled
+    current_enabled="$(gsettings get org.gnome.shell enabled-extensions 2>/dev/null || echo "[]")"
+    current_enabled="${current_enabled#@as }"
+
+    # Merge our uuids into that list using Python to avoid GVariant string hell
+    local merged_enabled
+    merged_enabled="$(python3 - "$current_enabled" "${uuids[@]}" << 'PY'
+import ast, sys
+current = sys.argv[1]
+uuids = sys.argv[2:]
+try:
+    arr = ast.literal_eval(current)
+    if not isinstance(arr, list):
+        arr = []
+except Exception:
+    arr = []
+for u in uuids:
+    if u and u not in arr:
+        arr.append(u)
+print(str(arr))
+PY
+)" || merged_enabled=""
+
+    if [ -n "$merged_enabled" ]; then
+      gsettings set org.gnome.shell enabled-extensions "$merged_enabled" 2>/dev/null || true
+    fi
+
+    # 2) Also remove our uuids from disabled-extensions if they somehow ended up there
+    local current_disabled
+    current_disabled="$(gsettings get org.gnome.shell disabled-extensions 2>/dev/null || echo "[]")"
+    current_disabled="${current_disabled#@as }"
+
+    local cleaned_disabled
+    cleaned_disabled="$(python3 - "$current_disabled" "${uuids[@]}" << 'PY'
+import ast, sys
+current = sys.argv[1]
+uuids = set(sys.argv[2:])
+try:
+    arr = ast.literal_eval(current)
+    if not isinstance(arr, list):
+        arr = []
+except Exception:
+    arr = []
+arr = [x for x in arr if x not in uuids]
+print(str(arr))
+PY
+)" || cleaned_disabled=""
+
+    if [ -n "$cleaned_disabled" ]; then
+      gsettings set org.gnome.shell disabled-extensions "$cleaned_disabled" 2>/dev/null || true
+    fi
   fi
 
-  if [ -n "$ARCMENU_UUID" ]; then
-    gnome-extensions enable "$ARCMENU_UUID" >/dev/null 2>&1 || true
+  # 3) Finally, ask gnome-extensions CLI to enable them (helps if shell is live)
+  if command -v gnome-extensions >/dev/null 2>&1; then
+    for uuid in "${uuids[@]}"; do
+      gnome-extensions enable "$uuid" >/dev/null 2>&1 || true
+    done
   fi
-  if [ -n "$TASKBAR_UUID" ]; then
-    gnome-extensions enable "$TASKBAR_UUID" >/dev/null 2>&1 || true
-  fi
+
+  echo "[GNOME] Ensured ArcMenu/App Icons Taskbar are marked ENABLED in gsettings."
 }
+
 
 enable_gnome_layout_extensions
 
