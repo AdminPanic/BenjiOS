@@ -30,6 +30,10 @@ TASKBAR_UUID=""
 # rEFInd boot mode: single (Ubuntu only), dual (Ubuntu + Windows), all (show everything)
 REFIND_BOOT_MODE="dual"
 
+# Extra GNOME extensions we control explicitly
+GSCONNECT_UUID="gsconnect@andyholmes.github.io"
+UBUNTU_DOCK_UUID="ubuntu-dock@ubuntu.com"
+
 #--------------------------------------
 # Basic sanity
 #--------------------------------------
@@ -763,22 +767,26 @@ rm -f "$POST_DOC_TMP"
 # Enable GNOME layout extensions at the very end
 #--------------------------------------
 enable_gnome_layout_extensions() {
-  # Nothing to do if we never got valid UUIDs
-  local uuids=()
-  [ -n "$ARCMENU_UUID" ]   && uuids+=("$ARCMENU_UUID")
-  [ -n "$TASKBAR_UUID" ]   && uuids+=("$TASKBAR_UUID")
-  [ "${#uuids[@]}" -eq 0 ] && return
+  # What we want enabled/disabled after install
+  local enable_uuids=()
+  [ -n "$ARCMENU_UUID" ] && enable_uuids+=("$ARCMENU_UUID")
+  [ -n "$TASKBAR_UUID" ] && enable_uuids+=("$TASKBAR_UUID")
+  enable_uuids+=("$GSCONNECT_UUID")   # make sure GSConnect is on
 
-  # 1) Explicitly update org.gnome.shell enabled-extensions
+  local disable_uuids=("$UBUNTU_DOCK_UUID")  # kill the default Ubuntu Dock
+
+  if [ "${#enable_uuids[@]}" -eq 0 ] && [ "${#disable_uuids[@]}" -eq 0 ]; then
+    return
+  fi
+
+  # 1) Persist the state with gsettings (if available)
   if command -v gsettings >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
-    # Read current enabled list (may be "@as []" or "[]")
-    local current_enabled
+    # --- enabled-extensions: add our enable_uuids ---
+    local current_enabled merged_enabled
     current_enabled="$(gsettings get org.gnome.shell enabled-extensions 2>/dev/null || echo "[]")"
     current_enabled="${current_enabled#@as }"
 
-    # Merge our uuids into that list using Python to avoid GVariant string hell
-    local merged_enabled
-    merged_enabled="$(python3 - "$current_enabled" "${uuids[@]}" << 'PY'
+    merged_enabled="$(python3 - "$current_enabled" "${enable_uuids[@]}" << 'PY'
 import ast, sys
 current = sys.argv[1]
 uuids = sys.argv[2:]
@@ -799,42 +807,60 @@ PY
       gsettings set org.gnome.shell enabled-extensions "$merged_enabled" 2>/dev/null || true
     fi
 
-    # 2) Also remove our uuids from disabled-extensions if they somehow ended up there
-    local current_disabled
+    # --- disabled-extensions: remove our enabled ones, add ones we want disabled ---
+    local current_disabled cleaned_disabled final_disabled
     current_disabled="$(gsettings get org.gnome.shell disabled-extensions 2>/dev/null || echo "[]")"
     current_disabled="${current_disabled#@as }"
 
-    local cleaned_disabled
-    cleaned_disabled="$(python3 - "$current_disabled" "${uuids[@]}" << 'PY'
+    cleaned_disabled="$(python3 - "$current_disabled" "${enable_uuids[@]}" << 'PY'
 import ast, sys
 current = sys.argv[1]
-uuids = set(sys.argv[2:])
+enabled = set(sys.argv[2:])
 try:
     arr = ast.literal_eval(current)
     if not isinstance(arr, list):
         arr = []
 except Exception:
     arr = []
-arr = [x for x in arr if x not in uuids]
+arr = [x for x in arr if x not in enabled]
 print(str(arr))
 PY
 )" || cleaned_disabled=""
 
-    if [ -n "$cleaned_disabled" ]; then
-      gsettings set org.gnome.shell disabled-extensions "$cleaned_disabled" 2>/dev/null || true
+    final_disabled="$(python3 - "$cleaned_disabled" "${disable_uuids[@]}" << 'PY'
+import ast, sys
+current = sys.argv[1]
+disable = sys.argv[2:]
+try:
+    arr = ast.literal_eval(current)
+    if not isinstance(arr, list):
+        arr = []
+except Exception:
+    arr = []
+for u in disable:
+    if u and u not in arr:
+        arr.append(u)
+print(str(arr))
+PY
+)" || final_disabled=""
+
+    if [ -n "$final_disabled" ]; then
+      gsettings set org.gnome.shell disabled-extensions "$final_disabled" 2>/dev/null || true
     fi
   fi
 
-  # 3) Finally, ask gnome-extensions CLI to enable them (helps if shell is live)
+  # 2) Also poke the gnome-extensions CLI (helps in the live session)
   if command -v gnome-extensions >/dev/null 2>&1; then
-    for uuid in "${uuids[@]}"; do
-      gnome-extensions enable "$uuid" >/dev/null 2>&1 || true
+    for uuid in "${enable_uuids[@]}"; do
+      [ -n "$uuid" ] && gnome-extensions enable "$uuid" >/dev/null 2>&1 || true
+    done
+    for uuid in "${disable_uuids[@]}"; do
+      [ -n "$uuid" ] && gnome-extensions disable "$uuid" >/dev/null 2>&1 || true
     done
   fi
 
-  echo "[GNOME] Ensured ArcMenu/App Icons Taskbar are marked ENABLED in gsettings."
+  echo "[GNOME] Ensured ArcMenu, App Icons Taskbar, and GSConnect are ENABLED, Ubuntu Dock is DISABLED."
 }
-
 
 enable_gnome_layout_extensions
 
