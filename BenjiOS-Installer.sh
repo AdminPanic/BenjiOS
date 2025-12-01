@@ -433,16 +433,41 @@ fi
 # Helper: GNOME appearance + power profile
 #--------------------------------------
 configure_gnome_look_and_power() {
-  if command -v gsettings >/dev/null 2>&1; then
-    gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' 2>/dev/null || true
-    gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-dark' 2>/dev/null || true
-    gsettings set org.gnome.desktop.interface accent-color 'green' 2>/dev/null || true
+   if ! command -v gsettings >/dev/null 2>&1; then
+    echo "[THEME] gsettings not found – skipping desktop theming."
+    return
   fi
 
-  if command -v powerprofilesctl >/dev/null 2>&1; then
-    if powerprofilesctl list 2>/dev/null | grep -q "performance"; then
-      powerprofilesctl set performance >/dev/null 2>&1 || true
-    fi
+  local IF_SCHEMA="org.gnome.desktop.interface"
+
+  echo "[THEME] Applying BenjiOS GNOME look (dark + green accent)…"
+
+  # 1) Dark mode, both upstream GNOME and Ubuntu’s legacy toggle
+  gsettings set "$IF_SCHEMA" color-scheme 'prefer-dark' 2>/dev/null || true
+  if gsettings writable org.gnome.shell.ubuntu color-scheme >/dev/null 2>&1; then
+    gsettings set org.gnome.shell.ubuntu color-scheme 'dark' 2>/dev/null || true
+  fi
+
+  # 2) GTK + icons + sound: stock Yaru, dark variant
+  gsettings set "$IF_SCHEMA" gtk-theme  'Yaru-dark' 2>/dev/null || true
+  gsettings set "$IF_SCHEMA" icon-theme 'Yaru'      2>/dev/null || true
+  gsettings set org.gnome.desktop.sound theme-name 'Yaru' 2>/dev/null || true
+
+  # 3) Accent color
+  # New style (Ubuntu 24.10+/25.04+/GNOME 47+): org.gnome.desktop.interface accent-color
+  if gsettings range "$IF_SCHEMA" accent-color >/dev/null 2>&1; then
+    # Values are typically: blue, teal, green, yellow, orange, red, pink, purple, slate 
+    gsettings set "$IF_SCHEMA" accent-color 'green' 2>/dev/null || true
+    local current
+    current="$(gsettings get "$IF_SCHEMA" accent-color 2>/dev/null || echo '?')"
+    echo "[THEME] accent-color key now: $current"
+
+  else
+    # Old style (22.04 / some 24.04): accent is encoded in gtk-theme name
+    # Try a green-ish Yaru variant if it exists, but don’t die if it doesn’t.
+    gsettings set "$IF_SCHEMA" gtk-theme 'Yaru-green-dark' 2>/dev/null || \
+    gsettings set "$IF_SCHEMA" gtk-theme 'Yaru-green'      2>/dev/null || true
+    echo "[THEME] accent-color key missing; tried Yaru-green(-dark) instead."
   fi
 }
 
