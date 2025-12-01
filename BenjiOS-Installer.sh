@@ -21,7 +21,16 @@ RAW_BASE="https://raw.githubusercontent.com/AdminPanic/BenjiOS/main"
 DESKTOP_DIR="$HOME/Desktop"
 
 ZENITY_W=640
-ZENITY_H=480
+ZENITY_H=640
+
+info_popup() {
+  local msg="$1"
+  zenity --info \
+    --timeout=5 \
+    --title="BenjiOS Installer" \
+    --width="$ZENITY_W" --height=200 \
+    --text="$msg" >/dev/null 2>&1 || true
+}
 
 # Will be filled when we install GNOME extensions
 ARCMENU_UUID=""
@@ -153,9 +162,7 @@ STACK_SELECTION="$(zenity --list \
 )" || true
 
 if [ -z "$STACK_SELECTION" ]; then
-  zenity --info --title="BenjiOS Installer" \
-    --width="$ZENITY_W" --height=200 \
-    --text="No optional stacks selected.\nCore stack will still be installed."
+    info_popup "No optional stacks selected.\nCore stack will still be installed."
 fi
 
 has_stack() {
@@ -212,9 +219,7 @@ fi
 #--------------------------------------
 # Step 1 – apt update + full-upgrade + i386
 #--------------------------------------
-zenity --info --title="BenjiOS Installer" \
-  --width="$ZENITY_W" --height=200 \
-  --text="Step 1: Updating system and enabling 32-bit architecture.\n\nYou can watch progress in the terminal."
+info_popup "Step 1: Updating system and enabling 32-bit architecture.\n\nYou can watch progress in the terminal."
 
 run_sudo_apt apt update
 run_sudo_apt apt full-upgrade -y \
@@ -371,9 +376,7 @@ fi
 # Install APT packages
 #--------------------------------------
 if [ "${#APT_PKGS[@]}" -gt 0 ]; then
-  zenity --info --title="BenjiOS Installer" \
-    --width="$ZENITY_W" --height=200 \
-    --text="Step 2: Installing APT packages…\n\nCheck the terminal for detailed progress."
+  info_popup "Step 2: Installing APT packages…\n\nCheck the terminal for detailed progress."
 
   # Deduplicate
   declare -A SEEN
@@ -395,9 +398,7 @@ fi
 #--------------------------------------
 # Flatpak setup + apps
 #--------------------------------------
-zenity --info --title="BenjiOS Installer" \
-  --width="$ZENITY_W" --height=200 \
-  --text="Step 3: Configuring Flatpak and installing apps…"
+info_popup "Step 3: Configuring Flatpak and installing apps…"
 
 flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true
 
@@ -812,9 +813,7 @@ fi
 #--------------------------------------
 # Maintenance / cleanup
 #--------------------------------------
-zenity --info --title="BenjiOS Installer" \
-  --width="$ZENITY_W" --height=200 \
-  --text="Step 4: Running maintenance tasks (firmware, Flatpak, cleanup)…"
+info_popup "Step 4: Running maintenance tasks (firmware, Flatpak, cleanup)…"
 
 run_sudo_apt apt autoremove --purge -y || true
 run_sudo_apt apt clean || true
@@ -946,9 +945,7 @@ enable_gnome_layout_extensions
 #--------------------------------------
 # Done
 #--------------------------------------
-zenity --info --title="BenjiOS Installer" \
-  --width="$ZENITY_W" --height=260 \
-  --text="BenjiOS setup is complete.\n\nArcMenu and App Icons Taskbar have been installed, configured, and ACTIVATED for the BenjiOS layout.\n\nrEFInd (if selected) was configured using the chosen boot mode and BsxM1 theme.\n\nA reboot is STRONGLY recommended so GNOME and rEFInd fully pick up the new configuration."
+info_popup "BenjiOS setup is complete.\n\nArcMenu and App Icons Taskbar have been installed, configured, and ACTIVATED for the BenjiOS layout.\n\nrEFInd (if selected) was configured using the chosen boot mode and BsxM1 theme.\n\nA reboot is STRONGLY recommended so GNOME and rEFInd fully pick up the new configuration."
 
 if zenity --question --title="BenjiOS Installer" \
     --width="$ZENITY_W" --height=220 \
