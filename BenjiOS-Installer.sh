@@ -469,6 +469,23 @@ configure_gnome_look_and_power() {
     gsettings set "$IF_SCHEMA" gtk-theme 'Yaru-green'      2>/dev/null || true
     echo "[THEME] accent-color key missing; tried Yaru-green(-dark) instead."
   fi
+
+  # Force Yaru theme refresh to apply accent properly (folders, selection box, etc.)
+if [ -x /usr/libexec/yaru-colors-switcher ]; then
+  echo "[THEME] Refreshing Yaru theme via yaru-colors-switcher..."
+  /usr/libexec/yaru-colors-switcher --color green --theme dark || true
+elif [ -x /usr/lib/yaru-colors-switcher ]; then
+  # Some builds install it under /usr/lib
+  echo "[THEME] Refreshing Yaru theme via /usr/lib/yaru-colors-switcher..."
+  /usr/lib/yaru-colors-switcher --color green --theme dark || true
+else
+  echo "[THEME] No yaru-colors-switcher found; skipping live recolor."
+fi
+
+# Rebuild icon caches just in case
+gtk-update-icon-cache ~/.icons >/dev/null 2>&1 || true
+gtk-update-icon-cache /usr/share/icons/Yaru >/dev/null 2>&1 || true
+
 }
 
 configure_gnome_look_and_power
