@@ -1,0 +1,22 @@
+# BenjiOS baseline zram configuration for zramswap
+# This file will be installed to /etc/default/zramswap
+
+# Compression algorithm used for the zram device.
+# Common choices: lzo, lzo-rle, lz4, zstd
+ALGO=zstd
+
+# How much of total RAM to dedicate to zram swap (in percent).
+# 25 is a good desktop/laptop default: noticeable benefit,
+# without eating too much RAM.
+PERCENT=25
+
+# Optional: explicit size in MiB instead of PERCENT.
+# Leave commented so PERCENT is used.
+# SIZE=0
+
+# Kernel swap priority for the zram device.
+# Higher = preferred over disk swap. 100 is a sane default.
+PRIORITY=100
+
+# Number of zram devices. 1 is fine for almost all cases.
+ZRAM_NUM_DEVICES=1
