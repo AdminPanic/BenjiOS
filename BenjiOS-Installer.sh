@@ -15,7 +15,7 @@ RAW_BASE="https://raw.githubusercontent.com/AdminPanic/BenjiOS/main"
 DESKTOP_DIR="$HOME/Desktop"
 
 ZENITY_W=640
-ZENITY_H=480
+ZENITY_H=640
 
 # Filled when we install GNOME extensions
 ARCMENU_UUID=""
