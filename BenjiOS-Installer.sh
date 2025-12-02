@@ -2,27 +2,49 @@
 set -e
 
 ########################################
-# BenjiOS Installer v2
+# BenjiOS Installer
 # Target: Ubuntu 25.10+ (GNOME, Wayland)
 #
-# Key features:
-#  - Curated stacks (office, gaming, monitoring, backup, management, auto_updates, amd_tweaks, refind)
-#  - Flatpak + Flathub setup
-#  - rEFInd with BsxM1 theme and selectable boot mode
-#  - GNOME dark theme + BenjiOS layout
-#  - ArcMenu + App Icons Taskbar:
-#       * Installed from extensions.gnome.org
-#       * Config seeded from repo
-#       * Auto-enabled at the END of the installer
-#       * Reboot STRONGLY recommended afterwards
+# Design goals:
+#  - Sane defaults, minimal prompting
+#  - Script handles logic/orchestration
+#  - Repo holds configs (dconf, refind, zram)
 ########################################
 
 RAW_BASE="https://raw.githubusercontent.com/AdminPanic/BenjiOS/main"
 DESKTOP_DIR="$HOME/Desktop"
 
 ZENITY_W=640
-ZENITY_H=640
+ZENITY_H=480
 
+# Filled when we install GNOME extensions
+ARCMENU_UUID=""
+TASKBAR_UUID=""
+BLUR_SHELL_UUID=""
+
+# rEFInd boot mode: single (Ubuntu only), dual (Ubuntu + Windows), all (show everything)
+REFIND_BOOT_MODE="dual"
+
+# Extra GNOME extensions we control explicitly
+GSCONNECT_UUID="gsconnect@andyholmes.github.io"
+UBUNTU_DOCK_UUID="ubuntu-dock@ubuntu.com"
+
+# GPU detection flags
+AMD_GPU_DETECTED=false
+NVIDIA_GPU_DETECTED=false
+INTEL_GPU_DETECTED=false
+
+# Virtualization detection flags
+VIRT_TYPE="none"
+IS_VIRT=false
+IS_KVM=false        # includes Proxmox/QEMU
+IS_VMWARE=false
+IS_VBOX=false       # VirtualBox
+IS_HYPERV=false     # Hyper-V
+
+#--------------------------------------
+# Small helper: non-blocking info popup
+#--------------------------------------
 info_popup() {
   local msg="$1"
   zenity --info \
@@ -31,17 +53,6 @@ info_popup() {
     --width="$ZENITY_W" --height=200 \
     --text="$msg" >/dev/null 2>&1 || true
 }
-
-# Will be filled when we install GNOME extensions
-ARCMENU_UUID=""
-TASKBAR_UUID=""
-
-# rEFInd boot mode: single (Ubuntu only), dual (Ubuntu + Windows), all (show everything)
-REFIND_BOOT_MODE="dual"
-
-# Extra GNOME extensions we control explicitly
-GSCONNECT_UUID="gsconnect@andyholmes.github.io"
-UBUNTU_DOCK_UUID="ubuntu-dock@ubuntu.com"
 
 #--------------------------------------
 # Basic sanity
@@ -129,18 +140,62 @@ if ! echo "$SUDO_PASS" | sudo -S -v >/dev/null 2>&1; then
 fi
 
 #--------------------------------------
-# Detect AMD GPU
+# Detect GPUs (AMD / NVIDIA / Intel)
 #--------------------------------------
-AMD_GPU_DETECTED=false
-if lspci | grep -E "VGA|3D" | grep -qi "AMD"; then
+GPU_LINES="$(lspci | grep -Ei 'VGA|3D|Display' || true)"
+
+if echo "$GPU_LINES" | grep -qi "AMD"; then
   AMD_GPU_DETECTED=true
 fi
-
-if $AMD_GPU_DETECTED; then
-  AMD_DEFAULT="TRUE"
-else
-  AMD_DEFAULT="FALSE"
+if echo "$GPU_LINES" | grep -qi "NVIDIA"; then
+  NVIDIA_GPU_DETECTED=true
 fi
+if echo "$GPU_LINES" | grep -qi "Intel"; then
+  INTEL_GPU_DETECTED=true
+fi
+
+echo "[GPU] Detected GPUs:"
+echo "$GPU_LINES"
+$AMD_GPU_DETECTED    && echo "  -> AMD GPU detected"
+$NVIDIA_GPU_DETECTED && echo "  -> NVIDIA GPU detected"
+$INTEL_GPU_DETECTED  && echo "  -> Intel GPU detected"
+
+#--------------------------------------
+# Detect virtualization (KVM/Proxmox, VMware, VirtualBox, Hyper-V)
+#--------------------------------------
+if command -v systemd-detect-virt >/dev/null 2>&1; then
+  VIRT_TYPE="$(systemd-detect-virt 2>/dev/null || echo "none")"
+else
+  VIRT_TYPE="none"
+fi
+
+case "$VIRT_TYPE" in
+  kvm|qemu)
+    IS_VIRT=true
+    IS_KVM=true
+    ;;
+  vmware)
+    IS_VIRT=true
+    IS_VMWARE=true
+    ;;
+  oracle|virtualbox)
+    IS_VIRT=true
+    IS_VBOX=true
+    ;;
+  microsoft|hyperv)
+    IS_VIRT=true
+    IS_HYPERV=true
+    ;;
+  *)
+    IS_VIRT=false
+    ;;
+esac
+
+echo "[VIRT] Detected virtualization type: $VIRT_TYPE"
+$IS_KVM    && echo "  -> KVM/QEMU guest (includes Proxmox VMs)"
+$IS_VMWARE && echo "  -> VMware guest"
+$IS_VBOX   && echo "  -> VirtualBox guest"
+$IS_HYPERV && echo "  -> Hyper-V guest"
 
 #--------------------------------------
 # Stack selection
@@ -148,21 +203,21 @@ fi
 STACK_SELECTION="$(zenity --list \
   --title="BenjiOS Installer – Component Selection" \
   --width="$ZENITY_W" --height="$ZENITY_H" \
-  --text="Select which stacks to install.\n\nCore system tools are ALWAYS installed.\nYou can re-run this script later to add more stacks." \
+  --text="Select which stacks to install.\n\nCore system tools, GPU tweaks, and VM guest integrations (based on detected hardware) are ALWAYS installed.\nYou can re-run this script later to add more stacks." \
   --checklist \
   --column="Install" --column="ID" --column="Description" \
   TRUE  "office"        "Office, mail, basic media, RDP client" \
   TRUE  "gaming"        "Gaming stack: Steam, Heroic, Lutris, Proton tools" \
-  TRUE  "monitoring"    "Monitoring: sensors, btop, nvtop, psensor, etc." \
+  TRUE  "monitoring"    "Monitoring: sensors, btop, nvtop, psensor, disk health" \
   TRUE  "backup_tools"  "Backup tools: Timeshift, Déjà Dup, Borg, Vorta" \
   TRUE  "management"    "Remote management: SSH server, xRDP, firewall, WoL" \
+  TRUE  "tweaks"        "Performance tweaks: zram compressed swap + earlyoom" \
   TRUE  "auto_updates"  "Automatic APT updates (unattended-upgrades + cron-apt)" \
-  "$AMD_DEFAULT" "amd_tweaks" "AMD GPU tweaks (Mesa/Vulkan extras – only if AMD GPU detected)" \
   FALSE "refind"        "rEFInd boot manager with BsxM1 theme (advanced multi-boot)" \
 )" || true
 
 if [ -z "$STACK_SELECTION" ]; then
-    info_popup "No optional stacks selected.\nCore stack will still be installed."
+  info_popup "No optional stacks selected.\nCore stack, GPU tweaks, and VM integrations (if supported) will still be installed."
 fi
 
 has_stack() {
@@ -217,6 +272,25 @@ if $INSTALL_REFIND; then
 fi
 
 #--------------------------------------
+# Optional kisak-mesa PPA for AMD + gaming
+#--------------------------------------
+USE_KISAK_MESA=false
+if $AMD_GPU_DETECTED && has_stack "gaming"; then
+  if zenity --question \
+       --title="BenjiOS – AMD GPU detected" \
+       --width="$ZENITY_W" --height=220 \
+       --text="An AMD GPU and the Gaming stack were detected.\n\nYou can enable the kisak-mesa PPA to get newer Mesa drivers (often better performance and fixes for newer GPUs).\n\nEnable kisak-mesa PPA now?\n\n(Recommended for recent Radeon cards; slightly less conservative than stock Ubuntu Mesa.)"; then
+    USE_KISAK_MESA=true
+  fi
+fi
+
+if $USE_KISAK_MESA; then
+  info_popup "Enabling kisak-mesa PPA for newer Mesa drivers…"
+  run_sudo_apt apt install -y software-properties-common
+  run_sudo add-apt-repository -y ppa:kisak/kisak-mesa
+fi
+
+#--------------------------------------
 # Step 1 – apt update + full-upgrade + i386
 #--------------------------------------
 info_popup "Step 1: Updating system and enabling 32-bit architecture.\n\nYou can watch progress in the terminal."
@@ -265,7 +339,10 @@ add_apt \
   git \
   gnome-shell-extension-gsconnect \
   gnome-software-plugin-flatpak \
-  flatpak
+  flatpak \
+  ubuntu-drivers-common \
+  fonts-firacode \
+  fonts-noto-color-emoji
 
 add_flatpak \
   com.mattjakeman.ExtensionManager
@@ -307,7 +384,9 @@ if has_stack "gaming"; then
     com.valvesoftware.Steam \
     com.heroicgameslauncher.hgl \
     net.davidotek.pupgui2 \
-    net.lutris.Lutris
+    net.lutris.Lutris \
+    com.usebottles.bottles \
+    com.discordapp.Discord
 fi
 
 # Monitoring stack
@@ -323,7 +402,8 @@ if has_stack "monitoring"; then
     radeontop \
     htop \
     glances \
-    psensor
+    psensor \
+    gnome-disk-utility
 fi
 
 # Backup tools stack
@@ -346,6 +426,13 @@ if has_stack "management"; then
     ethtool
 fi
 
+# Tweaks stack (zram + earlyoom)
+if has_stack "tweaks"; then
+  add_apt \
+    zram-tools \
+    earlyoom
+fi
+
 # Auto updates stack
 if $AUTO_UPDATES_SELECTED; then
   add_apt \
@@ -353,14 +440,55 @@ if $AUTO_UPDATES_SELECTED; then
     cron-apt
 fi
 
-# AMD tweaks (only if AMD GPU present)
-if has_stack "amd_tweaks" && $AMD_GPU_DETECTED; then
+# GPU-specific tweaks (auto, based on detection)
+if $AMD_GPU_DETECTED; then
   add_apt \
     radeontop \
     mesa-vulkan-drivers \
     mesa-vulkan-drivers:i386 \
     vulkan-tools \
     mesa-utils
+fi
+
+if $NVIDIA_GPU_DETECTED; then
+  add_apt \
+    vulkan-tools \
+    mesa-utils \
+    nvidia-settings
+fi
+
+if $INTEL_GPU_DETECTED; then
+  add_apt \
+    mesa-vulkan-drivers \
+    mesa-vulkan-drivers:i386 \
+    vulkan-tools \
+    mesa-utils \
+    intel-gpu-tools
+fi
+
+# VM-specific guest additions / agents
+if $IS_KVM; then
+  add_apt \
+    qemu-guest-agent \
+    spice-vdagent
+fi
+
+if $IS_VMWARE; then
+  add_apt \
+    open-vm-tools \
+    open-vm-tools-desktop
+fi
+
+if $IS_VBOX; then
+  add_apt \
+    virtualbox-guest-utils \
+    virtualbox-guest-x11
+fi
+
+if $IS_HYPERV; then
+  add_apt \
+    linux-tools-virtual \
+    linux-cloud-tools-virtual
 fi
 
 # rEFInd stack
@@ -373,12 +501,11 @@ if $INSTALL_REFIND; then
 fi
 
 #--------------------------------------
-# Install APT packages
+# Install APT packages (deduplicated)
 #--------------------------------------
 if [ "${#APT_PKGS[@]}" -gt 0 ]; then
   info_popup "Step 2: Installing APT packages…\n\nCheck the terminal for detailed progress."
 
-  # Deduplicate
   declare -A SEEN
   UNIQUE_PKGS=()
   for pkg in "${APT_PKGS[@]}"; do
@@ -396,6 +523,15 @@ if [ "${#APT_PKGS[@]}" -gt 0 ]; then
 fi
 
 #--------------------------------------
+# NVIDIA driver autoinstall (if NVIDIA GPU)
+#--------------------------------------
+if $NVIDIA_GPU_DETECTED; then
+  echo "[GPU] NVIDIA GPU detected – running ubuntu-drivers autoinstall…"
+  info_popup "Detected NVIDIA GPU.\n\nBenjiOS will now run 'ubuntu-drivers autoinstall' to install the recommended NVIDIA driver."
+  run_sudo ubuntu-drivers autoinstall || true
+fi
+
+#--------------------------------------
 # Flatpak setup + apps
 #--------------------------------------
 info_popup "Step 3: Configuring Flatpak and installing apps…"
@@ -410,19 +546,20 @@ fi
 # Helper: configure auto updates (20auto-upgrades)
 #--------------------------------------
 setup_auto_updates() {
-  local days="$1"
+  local days="$1"   # "1" (daily) or "7" (weekly)
   local tmp_file
   tmp_file="$(mktemp)"
+
   cat > "$tmp_file" <<EOF_AUTO
-APT::Periodic::Update-Package-Lists "$days";
-APT::Periodic::Download-Upgradeable-Packages "$days";
-APT::Periodic::AutocleanInterval "7";
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
 APT::Periodic::Unattended-Upgrade "$days";
+APT::Periodic::AutocleanInterval "7";
 EOF_AUTO
+
   run_sudo cp "$tmp_file" /etc/apt/apt.conf.d/20auto-upgrades
   rm -f "$tmp_file"
 
-  run_sudo systemctl enable --now unattended-upgrades.service >/dev/null 2>&1 || true
   run_sudo dpkg-reconfigure -f noninteractive unattended-upgrades || true
 }
 
@@ -433,8 +570,8 @@ fi
 #--------------------------------------
 # Helper: GNOME appearance + power profile
 #--------------------------------------
-configure_gnome_look_and_power() {
-   if ! command -v gsettings >/dev/null 2>&1; then
+configure_gnome_theme_and_power() {
+  if ! command -v gsettings >/dev/null 2>&1; then
     echo "[THEME] gsettings not found – skipping desktop theming."
     return
   fi
@@ -443,56 +580,47 @@ configure_gnome_look_and_power() {
 
   echo "[THEME] Applying BenjiOS GNOME look (dark + green accent)…"
 
-  # 1) Dark mode, both upstream GNOME and Ubuntu’s legacy toggle
+  # Dark mode (upstream + Ubuntu-specific)
   gsettings set "$IF_SCHEMA" color-scheme 'prefer-dark' 2>/dev/null || true
   if gsettings writable org.gnome.shell.ubuntu color-scheme >/dev/null 2>&1; then
     gsettings set org.gnome.shell.ubuntu color-scheme 'dark' 2>/dev/null || true
   fi
 
-  # 2) GTK + icons + sound: stock Yaru, dark variant
+  # GTK + icons + sound: stock Yaru
   gsettings set "$IF_SCHEMA" gtk-theme  'Yaru-dark' 2>/dev/null || true
   gsettings set "$IF_SCHEMA" icon-theme 'Yaru'      2>/dev/null || true
   gsettings set org.gnome.desktop.sound theme-name 'Yaru' 2>/dev/null || true
 
-  # 3) Accent color
-  # New style (Ubuntu 24.10+/25.04+/GNOME 47+): org.gnome.desktop.interface accent-color
+  # Accent color: new GNOME key if available
   if gsettings range "$IF_SCHEMA" accent-color >/dev/null 2>&1; then
-    # Values are typically: blue, teal, green, yellow, orange, red, pink, purple, slate 
     gsettings set "$IF_SCHEMA" accent-color 'green' 2>/dev/null || true
-    local current
-    current="$(gsettings get "$IF_SCHEMA" accent-color 2>/dev/null || echo '?')"
-    echo "[THEME] accent-color key now: $current"
 
+    if [ -x /usr/libexec/yaru-colors-switcher ]; then
+      /usr/libexec/yaru-colors-switcher --color green --theme dark || true
+    elif [ -x /usr/lib/yaru-colors-switcher ]; then
+      /usr/lib/yaru-colors-switcher --color green --theme dark || true
+    fi
   else
-    # Old style (22.04 / some 24.04): accent is encoded in gtk-theme name
-    # Try a green-ish Yaru variant if it exists, but don’t die if it doesn’t.
     gsettings set "$IF_SCHEMA" gtk-theme 'Yaru-green-dark' 2>/dev/null || \
     gsettings set "$IF_SCHEMA" gtk-theme 'Yaru-green'      2>/dev/null || true
-    echo "[THEME] accent-color key missing; tried Yaru-green(-dark) instead."
   fi
 
-  # Force Yaru theme refresh to apply accent properly (folders, selection box, etc.)
-if [ -x /usr/libexec/yaru-colors-switcher ]; then
-  echo "[THEME] Refreshing Yaru theme via yaru-colors-switcher..."
-  /usr/libexec/yaru-colors-switcher --color green --theme dark || true
-elif [ -x /usr/lib/yaru-colors-switcher ]; then
-  # Some builds install it under /usr/lib
-  echo "[THEME] Refreshing Yaru theme via /usr/lib/yaru-colors-switcher..."
-  /usr/lib/yaru-colors-switcher --color green --theme dark || true
-else
-  echo "[THEME] No yaru-colors-switcher found; skipping live recolor."
-fi
+  # Rebuild icon caches (best effort)
+  [ -d "$HOME/.icons" ] && gtk-update-icon-cache "$HOME/.icons" >/dev/null 2>&1 || true
+  [ -d /usr/share/icons/Yaru ] && run_sudo gtk-update-icon-cache /usr/share/icons/Yaru >/dev/null 2>&1 || true
 
-# Rebuild icon caches just in case
-gtk-update-icon-cache ~/.icons >/dev/null 2>&1 || true
-gtk-update-icon-cache /usr/share/icons/Yaru >/dev/null 2>&1 || true
-
+  # Power profile: performance (guarded)
+  if command -v powerprofilesctl >/dev/null 2>&1; then
+    if powerprofilesctl list 2>/dev/null | grep -q "performance"; then
+      powerprofilesctl set performance >/dev/null 2>&1 || true
+    fi
+  fi
 }
 
-configure_gnome_look_and_power
+configure_gnome_theme_and_power
 
 #--------------------------------------
-# Helpers: GNOME extensions (ArcMenu + App Icons Taskbar)
+# Helpers: GNOME extensions (ArcMenu + App Icons Taskbar + Blur my Shell)
 #--------------------------------------
 ensure_gnome_extension_tools() {
   if ! command -v curl >/dev/null 2>&1; then
@@ -579,7 +707,7 @@ install_gnome_extension_by_id() {
 }
 
 configure_gnome_extensions_layout() {
-  echo "[GNOME] === Configuring GNOME Shell extensions (ArcMenu + App Icons Taskbar) ==="
+  echo "[GNOME] === Configuring GNOME Shell extensions (ArcMenu + App Icons Taskbar + Blur my Shell) ==="
 
   if ! ensure_gnome_extension_tools; then
     echo "[GNOME] Skipping GNOME extension installation due to missing tools." >&2
@@ -588,8 +716,10 @@ configure_gnome_extensions_layout() {
 
   ARCMENU_UUID="$(install_gnome_extension_by_id 3628 "ArcMenu" || true)"
   TASKBAR_UUID="$(install_gnome_extension_by_id 4944 "App Icons Taskbar" || true)"
+  BLUR_SHELL_UUID="$(install_gnome_extension_by_id 3193 "Blur my Shell" || true)"
 
   if command -v dconf >/dev/null 2>&1; then
+    # ArcMenu config
     local arcmenu_tmp
     arcmenu_tmp="$(mktemp)"
     if curl -fsSL "$RAW_BASE/configs/arcmenu.conf" -o "$arcmenu_tmp"; then
@@ -600,6 +730,7 @@ configure_gnome_extensions_layout() {
     fi
     rm -f "$arcmenu_tmp"
 
+    # App Icons Taskbar config
     local taskbar_tmp
     taskbar_tmp="$(mktemp)"
     if curl -fsSL "$RAW_BASE/configs/app-icons-taskbar.conf" -o "$taskbar_tmp"; then
@@ -609,10 +740,22 @@ configure_gnome_extensions_layout() {
       echo "[GNOME] NOTE: Could not fetch app-icons-taskbar.conf; skipping Taskbar config." >&2
     fi
     rm -f "$taskbar_tmp"
+
+    # Blur my Shell config
+    local blur_tmp
+    blur_tmp="$(mktemp)"
+    if curl -fsSL "$RAW_BASE/configs/blur-my-shell.conf" -o "$blur_tmp"; then
+      dconf load /org/gnome/shell/extensions/blur-my-shell/ < "$blur_tmp" 2>/dev/null || \
+        echo "[GNOME] WARNING: Failed to load Blur my Shell dconf." >&2
+    else
+      echo "[GNOME] NOTE: Could not fetch blur-my-shell.conf; skipping Blur my Shell config." >&2
+    fi
+    rm -f "$blur_tmp"
   else
     echo "[GNOME] dconf not found; cannot apply extension configs." >&2
   fi
 
+  # Taskbar icon asset
   local icon_target="$HOME/.local/share/icons/hicolor/48x48/apps/BenjiOS-Menu.png"
   mkdir -p "$(dirname "$icon_target")"
   if curl -fsSL "$RAW_BASE/assets/Taskbar.png" -o "$icon_target"; then
@@ -623,7 +766,7 @@ configure_gnome_extensions_layout() {
     echo "[GNOME] NOTE: Could not fetch Taskbar.png; ArcMenu icon may fall back to default." >&2
   fi
 
-  echo "[GNOME] ArcMenu and App Icons Taskbar are installed, configured, and currently DISABLED."
+  echo "[GNOME] ArcMenu, App Icons Taskbar, and Blur my Shell are installed and currently DISABLED (will be turned on at the end)."
 }
 
 configure_gnome_extensions_layout
@@ -671,8 +814,46 @@ if has_stack "management"; then
   fi
 fi
 
+# Tweaks stack: zram + earlyoom using repo config
+if has_stack "tweaks"; then
+  echo "[TWEAKS] Configuring zram (zram-tools) and earlyoom…"
+
+  tmp_zram="$(mktemp)"
+  if curl -fsSL "$RAW_BASE/configs/zramswap" -o "$tmp_zram"; then
+    run_sudo cp "$tmp_zram" /etc/default/zramswap
+  else
+    echo "[TWEAKS] WARNING: Could not fetch zramswap config from repo, keeping distro default." >&2
+  fi
+  rm -f "$tmp_zram"
+
+  run_sudo systemctl enable --now zramswap.service >/dev/null 2>&1 || \
+  run_sudo systemctl enable --now zramswap >/dev/null 2>&1 || true
+
+  run_sudo systemctl enable --now earlyoom.service >/dev/null 2>&1 || true
+fi
+
+# VM guest services
+if $IS_KVM; then
+  run_sudo systemctl enable --now qemu-guest-agent.service >/dev/null 2>&1 || true
+  run_sudo systemctl enable --now spice-vdagent.service >/dev/null 2>&1 || true
+fi
+
+if $IS_VMWARE; then
+  run_sudo systemctl enable --now open-vm-tools.service >/dev/null 2>&1 || true
+fi
+
+if $IS_VBOX; then
+  run_sudo systemctl enable --now vboxservice.service >/dev/null 2>&1 || true
+fi
+
+if $IS_HYPERV; then
+  for svc in hv-kvp-daemon.service hv-vss-daemon.service hv-fcopy-daemon.service; do
+    run_sudo systemctl enable --now "$svc" >/dev/null 2>&1 || true
+  done
+fi
+
 #--------------------------------------
-# rEFInd install + theme (BsxM1) with mode
+# rEFInd install + theme (BsxM1) with mode, using repo configs
 #--------------------------------------
 install_and_configure_refind() {
   local mode="$1"
@@ -683,28 +864,23 @@ install_and_configure_refind() {
     return
   fi
 
-  # Run rEFInd’s own installer if present
   if command -v refind-install >/dev/null 2>&1; then
     run_sudo refind-install || true
   fi
 
-  # Paths to the standard loaders on the ESP
   local ubuntu_rel="EFI/ubuntu/shimx64.efi"
   local windows_rel="EFI/Microsoft/Boot/bootmgfw.efi"
 
   local have_ubuntu=false
   local have_windows=false
-  [ -f "$esp/$ubuntu_rel" ]   && have_ubuntu=true
-  [ -f "$esp/$windows_rel" ]  && have_windows=true
+  [ -f "$esp/$ubuntu_rel" ]  && have_ubuntu=true
+  [ -f "$esp/$windows_rel" ] && have_windows=true
 
-  # If user picked modes that don't make sense for this machine, degrade gracefully
   local effective_mode="$mode"
   if [ "$effective_mode" = "dual" ] && ! $have_windows; then
-    # No Windows -> behave like single boot
     effective_mode="single"
   fi
   if [ "$effective_mode" = "single" ] && ! $have_ubuntu; then
-    # Somehow no Ubuntu shim where we expect it -> fall back to full scan
     effective_mode="all"
   fi
 
@@ -719,91 +895,26 @@ install_and_configure_refind() {
   local refind_conf="$refind_dir/refind.conf"
   run_sudo mkdir -p "$refind_dir"
 
-  local tmp_conf
+  local tmp_conf refind_src
   tmp_conf="$(mktemp)"
 
-  # Base settings (no scanfor here – that depends on mode)
-  cat > "$tmp_conf" << 'EOF_REF'
-# BenjiOS rEFInd configuration
-# Generated by BenjiOS-Installer.sh
-
-timeout 10
-use_nvram false
-resolution max
-
-# Mouse support
-enable_mouse
-mouse_size 16
-mouse_speed 6
-
-# Basic tools
-showtools shell, reboot, shutdown, firmware
-EOF_REF
-
   case "$effective_mode" in
-    single)
-      # One Secure Boot–friendly Ubuntu entry only (shimx64.efi)
-      cat >> "$tmp_conf" << 'EOF_SINGLE'
-
-# Mode: Single Boot Ubuntu
-scanfor manual
-default_selection "Ubuntu (BenjiOS)"
-
-menuentry "Ubuntu (BenjiOS)" {
-    loader \EFI\ubuntu\shimx64.efi
-}
-EOF_SINGLE
-      ;;
-
-    dual)
-      # Ubuntu + Windows, both via their standard signed bootloaders
-      cat >> "$tmp_conf" << 'EOF_DUAL'
-
-# Mode: Dual Boot Ubuntu + Windows
-scanfor manual
-default_selection "Ubuntu (BenjiOS)"
-
-menuentry "Ubuntu (BenjiOS)" {
-    loader \EFI\ubuntu\shimx64.efi
-}
-
-menuentry "Windows" {
-    loader \EFI\Microsoft\Boot\bootmgfw.efi
-}
-EOF_DUAL
-      ;;
-
-    all)
-      # Let rEFInd show everything it finds
-      cat >> "$tmp_conf" << 'EOF_ALL'
-
-# Mode: Show all entries
-# Let rEFInd auto-detect all loaders.
-scanfor internal,external,optical,manual
-EOF_ALL
-      ;;
-
-    *)
-      # Safety net: behave like "all"
-      cat >> "$tmp_conf" << 'EOF_FALLBACK'
-
-# Mode: Unknown (fallback to show all)
-scanfor internal,external,optical,manual
-EOF_FALLBACK
-      ;;
+    single) refind_src="$RAW_BASE/configs/refind/refind-single.conf" ;;
+    dual)   refind_src="$RAW_BASE/configs/refind/refind-dual.conf" ;;
+    all)    refind_src="$RAW_BASE/configs/refind/refind-all.conf" ;;
+    *)      refind_src="$RAW_BASE/configs/refind/refind-all.conf" ;;
   esac
 
-  # Always include the BsxM1 theme, relative to EFI/refind/
-  cat >> "$tmp_conf" << 'EOF_THEME'
-
-# BenjiOS theme (BsxM1) – path relative to EFI/refind/
-include themes/refind-bsxm1-theme/theme.conf
-EOF_THEME
+  if ! curl -fsSL "$refind_src" -o "$tmp_conf"; then
+    echo "[rEFInd] WARNING: Could not fetch rEFInd config '$refind_src' from repo, leaving existing config untouched." >&2
+    rm -f "$tmp_conf"
+    return
+  fi
 
   run_sudo cp "$tmp_conf" "$refind_conf"
   rm -f "$tmp_conf"
 
-  echo "[rEFInd] Installed/updated with mode='${effective_mode}' and BsxM1 theme enabled."
+  echo "[rEFInd] Installed/updated with mode='${effective_mode}' using config from repo."
 }
 
 if $INSTALL_REFIND; then
@@ -845,21 +956,19 @@ rm -f "$POST_DOC_TMP"
 # Enable GNOME layout extensions at the very end
 #--------------------------------------
 enable_gnome_layout_extensions() {
-  # What we want enabled/disabled after install
   local enable_uuids=()
-  [ -n "$ARCMENU_UUID" ] && enable_uuids+=("$ARCMENU_UUID")
-  [ -n "$TASKBAR_UUID" ] && enable_uuids+=("$TASKBAR_UUID")
-  enable_uuids+=("$GSCONNECT_UUID")   # make sure GSConnect is on
+  [ -n "$ARCMENU_UUID" ]     && enable_uuids+=("$ARCMENU_UUID")
+  [ -n "$TASKBAR_UUID" ]     && enable_uuids+=("$TASKBAR_UUID")
+  [ -n "$BLUR_SHELL_UUID" ]  && enable_uuids+=("$BLUR_SHELL_UUID")
+  enable_uuids+=("$GSCONNECT_UUID")
 
-  local disable_uuids=("$UBUNTU_DOCK_UUID")  # kill the default Ubuntu Dock
+  local disable_uuids=("$UBUNTU_DOCK_UUID")
 
   if [ "${#enable_uuids[@]}" -eq 0 ] && [ "${#disable_uuids[@]}" -eq 0 ]; then
     return
   fi
 
-  # 1) Persist the state with gsettings (if available)
   if command -v gsettings >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
-    # --- enabled-extensions: add our enable_uuids ---
     local current_enabled merged_enabled
     current_enabled="$(gsettings get org.gnome.shell enabled-extensions 2>/dev/null || echo "[]")"
     current_enabled="${current_enabled#@as }"
@@ -885,7 +994,6 @@ PY
       gsettings set org.gnome.shell enabled-extensions "$merged_enabled" 2>/dev/null || true
     fi
 
-    # --- disabled-extensions: remove our enabled ones, add ones we want disabled ---
     local current_disabled cleaned_disabled final_disabled
     current_disabled="$(gsettings get org.gnome.shell disabled-extensions 2>/dev/null || echo "[]")"
     current_disabled="${current_disabled#@as }"
@@ -927,7 +1035,6 @@ PY
     fi
   fi
 
-  # 2) Also poke the gnome-extensions CLI (helps in the live session)
   if command -v gnome-extensions >/dev/null 2>&1; then
     for uuid in "${enable_uuids[@]}"; do
       [ -n "$uuid" ] && gnome-extensions enable "$uuid" >/dev/null 2>&1 || true
@@ -937,7 +1044,7 @@ PY
     done
   fi
 
-  echo "[GNOME] Ensured ArcMenu, App Icons Taskbar, and GSConnect are ENABLED, Ubuntu Dock is DISABLED."
+  echo "[GNOME] Ensured ArcMenu, App Icons Taskbar, Blur my Shell, and GSConnect are ENABLED, Ubuntu Dock is DISABLED."
 }
 
 enable_gnome_layout_extensions
@@ -945,7 +1052,7 @@ enable_gnome_layout_extensions
 #--------------------------------------
 # Done
 #--------------------------------------
-info_popup "BenjiOS setup is complete.\n\nArcMenu and App Icons Taskbar have been installed, configured, and ACTIVATED for the BenjiOS layout.\n\nrEFInd (if selected) was configured using the chosen boot mode and BsxM1 theme.\n\nA reboot is STRONGLY recommended so GNOME and rEFInd fully pick up the new configuration."
+info_popup "BenjiOS setup is complete.\n\nArcMenu, App Icons Taskbar, Blur my Shell and GSConnect have been installed, configured, and ACTIVATED for the BenjiOS layout.\n\nrEFInd (if selected) was configured using a config from the repo.\n\nA reboot is STRONGLY recommended so GNOME and rEFInd fully pick up the new configuration."
 
 if zenity --question --title="BenjiOS Installer" \
     --width="$ZENITY_W" --height=220 \
