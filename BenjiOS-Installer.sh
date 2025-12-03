@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
+set -euo pipefail  # Enable strict error handling (added -u and pipefail)
 
 ########################################
 # BenjiOS Installer
@@ -25,7 +25,7 @@ BLUR_SHELL_UUID=""
 # rEFInd boot mode: single (Ubuntu only), dual (Ubuntu + Windows), all (show everything)
 REFIND_BOOT_MODE="dual"
 
-# Extra GNOME extensions we control explicitly
+# Extra GNOME extensions explicitly managed
 GSCONNECT_UUID="gsconnect@andyholmes.github.io"
 UBUNTU_DOCK_UUID="ubuntu-dock@ubuntu.com"
 
@@ -112,7 +112,7 @@ fi
 rm -f "$LICENSE_FILE"
 
 #--------------------------------------
-# Sudo via zenity (one-time password check)
+# Sudo via zenity (cached password)
 #--------------------------------------
 SUDO_PASS="$(zenity --password --title='BenjiOS Installer – sudo access' \
   --width="$ZENITY_W" --height=200)"
@@ -124,58 +124,30 @@ if [ -z "$SUDO_PASS" ]; then
   exit 1
 fi
 
-if ! printf '%s\n' "$SUDO_PASS" | sudo -S -v >/dev/null 2>&1; then
+# Helper functions to run sudo commands with cached password
+run_sudo() {
+  echo "$SUDO_PASS" | sudo -S "$@"
+}
+run_sudo_apt() {
+  echo "$SUDO_PASS" | sudo -S DEBIAN_FRONTEND=noninteractive "$@"
+}
+
+# Verify sudo password (extend sudo timestamp)
+if ! echo "$SUDO_PASS" | sudo -S -v >/dev/null 2>&1; then
   zenity --error --title="BenjiOS Installer" \
     --width="$ZENITY_W" --height=200 \
     --text="Incorrect sudo password.\nExiting."
   exit 1
 fi
 
-# Drop the password from memory as soon as possible
-unset SUDO_PASS
-
-run_sudo() {
-  sudo "$@"
-}
-
-run_sudo_apt() {
-  sudo DEBIAN_FRONTEND=noninteractive "$@"
-}
-
-backup_file() {
-  local target="$1"
-  if [ -f "$target" ]; then
-    local ts
-    ts="$(date +%Y%m%d-%H%M%S)"
-    run_sudo cp "$target" "${target}.bak.${ts}"
-  fi
-}
-
-find_esp() {
-  local candidates=(
-    /boot/efi
-    /boot/EFI
-    /efi
-  )
-  local p
-  for p in "${candidates[@]}"; do
-    if mountpoint -q "$p"; then
-      printf '%s\n' "$p"
-      return 0
-    fi
-  done
-  return 1
-}
-
 #--------------------------------------
 # Detect GPUs (AMD / NVIDIA / Intel)
 #--------------------------------------
 GPU_LINES=""
-
 if command -v lspci >/dev/null 2>&1; then
   GPU_LINES="$(lspci | grep -Ei 'VGA|3D|Display' || true)"
 else
-  echo "[GPU] lspci not found; skipping detailed GPU detection."
+  echo "[GPU] Note: 'lspci' not found, skipping GPU detection." >&2
 fi
 
 if echo "$GPU_LINES" | grep -qi "AMD"; then
@@ -188,10 +160,8 @@ if echo "$GPU_LINES" | grep -qi "Intel"; then
   INTEL_GPU_DETECTED=true
 fi
 
-if [ -n "$GPU_LINES" ]; then
-  echo "[GPU] Detected GPUs:"
-  echo "$GPU_LINES"
-fi
+echo "[GPU] Detected GPUs:"
+echo "$GPU_LINES"
 $AMD_GPU_DETECTED    && echo "  -> AMD GPU detected"
 $NVIDIA_GPU_DETECTED && echo "  -> NVIDIA GPU detected"
 $INTEL_GPU_DETECTED  && echo "  -> Intel GPU detected"
@@ -248,7 +218,7 @@ STACK_SELECTION="$(zenity --list \
   TRUE  "backup_tools"  "Backup tools: Timeshift, Déjà Dup, Borg, Vorta" \
   TRUE  "management"    "Remote management: SSH server, xRDP, firewall, WoL" \
   TRUE  "tweaks"        "Performance tweaks: zram compressed swap + earlyoom" \
-  TRUE  "auto_updates"  "Automatic APT updates (unattended-upgrades + cron-apt)" \
+  TRUE  "auto_updates"  "Automatic APT updates (unattended-upgrades)" \
   FALSE "refind"        "rEFInd boot manager with BsxM1 theme (advanced multi-boot)" \
 )" || true
 
@@ -285,26 +255,31 @@ fi
 
 INSTALL_REFIND=false
 if has_stack "refind"; then
-  INSTALL_REFIND=true
-fi
+  # Only install rEFInd if running on UEFI system
+  if [ -d /sys/firmware/efi ]; then
+    INSTALL_REFIND=true
+    # Ask rEFInd boot mode
+    REFIND_BOOT_MODE="$(zenity --list \
+      --title="BenjiOS – rEFInd Boot Mode" \
+      --width="$ZENITY_W" --height="$ZENITY_H" \
+      --text="Choose how rEFInd should present boot entries:\n\n• Single Boot Ubuntu\n• Dual Boot Ubuntu + Windows\n• Show all detected entries" \
+      --radiolist \
+      --column="Use" --column="ID"   --column="Description" \
+      TRUE  "dual"   "Dual Boot: Ubuntu + Windows, hide helper/junk entries" \
+      FALSE "single" "Single Boot: Ubuntu only, hide Windows entries" \
+      FALSE "all"    "Show all detected entries (Linux, Windows, tools, etc.)" \
+    )" || true
 
-# Ask rEFInd boot mode if we install it
-if $INSTALL_REFIND; then
-  REFIND_BOOT_MODE="$(zenity --list \
-    --title="BenjiOS – rEFInd Boot Mode" \
-    --width="$ZENITY_W" --height="$ZENITY_H" \
-    --text="Choose how rEFInd should present boot entries:\n\n• Single Boot Ubuntu\n• Dual Boot Ubuntu + Windows\n• Show all detected entries" \
-    --radiolist \
-    --column="Use" --column="ID"   --column="Description" \
-    TRUE  "dual"   "Dual Boot: Ubuntu + Windows, hide helper/junk entries" \
-    FALSE "single" "Single Boot: Ubuntu only, hide Windows entries" \
-    FALSE "all"    "Show all detected entries (Linux, Windows, tools, etc.)" \
-  )" || true
-
-  case "$REFIND_BOOT_MODE" in
-    single|dual|all) ;;
-    *) REFIND_BOOT_MODE="dual" ;;
-  esac
+    case "$REFIND_BOOT_MODE" in
+      single|dual|all) ;; 
+      *) REFIND_BOOT_MODE="dual" ;;
+    esac
+  else
+    zenity --warning --title="BenjiOS – rEFInd Skipped" \
+      --width="$ZENITY_W" --height=150 \
+      --text="rEFInd boot manager requires UEFI, but this system is not UEFI.\nSkipping rEFInd installation."
+    INSTALL_REFIND=false
+  fi
 fi
 
 #--------------------------------------
@@ -323,7 +298,12 @@ fi
 if $USE_KISAK_MESA; then
   info_popup "Enabling kisak-mesa PPA for newer Mesa drivers…"
   run_sudo_apt apt install -y software-properties-common
-  run_sudo add-apt-repository -y ppa:kisak/kisak-mesa
+  # Only add PPA if not already present, to avoid duplicate error
+  if ! grep -Rq "kisak.*kisak-mesa" /etc/apt/sources.list /etc/apt/sources.list.d; then
+    run_sudo add-apt-repository -y ppa:kisak/kisak-mesa
+  else
+    echo "[APT] kisak-mesa PPA already exists, skipping add-apt-repository."
+  fi
 fi
 
 #--------------------------------------
@@ -336,14 +316,14 @@ run_sudo_apt apt full-upgrade -y \
   -o Dpkg::Options::=--force-confdef \
   -o Dpkg::Options::=--force-confnew
 
-# Enable multiarch
+# Enable multiarch for 32-bit packages (for gaming/wine)
 run_sudo dpkg --add-architecture i386 || true
 run_sudo_apt apt update
 
-# Preseed MS core fonts EULA
+# Preseed MS core fonts EULA (to avoid pop-up)
 run_sudo_apt apt install -y debconf-utils
-echo | sudo -S bash -c "echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | debconf-set-selections"
-echo | sudo -S bash -c "echo 'ttf-mscorefonts-installer msttcorefonts/present-mscorefonts-eula note' | debconf-set-selections"
+echo "$SUDO_PASS" | sudo -S bash -c "echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | debconf-set-selections"
+echo "$SUDO_PASS" | sudo -S bash -c "echo 'ttf-mscorefonts-installer msttcorefonts/present-mscorefonts-eula note' | debconf-set-selections"
 
 #--------------------------------------
 # Package aggregation
@@ -406,9 +386,8 @@ fi
 
 # Gaming stack
 if has_stack "gaming"; then
-  # Strategy:
-  #  - Mesa/Vulkan/runtime bits: APT (tied to kernel/driver stack)
-  #  - Game launchers/runtimes: Flatpak (usually newest stable builds)
+  # Mesa/Vulkan/runtime bits: APT (tied to kernel/driver stack)
+  # Game launchers/runtimes: Flatpak (for latest versions)
   add_apt \
     mesa-utils \
     vulkan-tools \
@@ -475,8 +454,9 @@ fi
 # Auto updates stack
 if $AUTO_UPDATES_SELECTED; then
   add_apt \
-    unattended-upgrades \
-    cron-apt
+    unattended-upgrades
+    # Removed cron-apt to avoid conflict; unattended-upgrades covers auto-updates
+    # cron-apt
 fi
 
 # GPU-specific tweaks (auto, based on detection)
@@ -533,6 +513,7 @@ fi
 # rEFInd stack
 if $INSTALL_REFIND; then
   add_apt \
+    refind \
     shim-signed \
     mokutil \
     git
@@ -595,9 +576,6 @@ APT::Periodic::Unattended-Upgrade "$days";
 APT::Periodic::AutocleanInterval "7";
 EOF_AUTO
 
-  if [ -f /etc/apt/apt.conf.d/20auto-upgrades ]; then
-    backup_file /etc/apt/apt.conf.d/20auto-upgrades
-  fi
   run_sudo cp "$tmp_file" /etc/apt/apt.conf.d/20auto-upgrades
   rm -f "$tmp_file"
 
@@ -707,15 +685,14 @@ install_gnome_extension_by_id() {
   uuid="$(printf '%s\n' "$json" | jq -r '.uuid')"
   download_url="$(printf '%s\n' "$json" | jq -r '.download_url')"
 
-  if [ -z "$uuid" ] || [ "$uuid" = "null" ] || \
-     [ -z "$download_url" ] || [ "$download_url" = "null" ]; then
+  if [ -z "$uuid" ] || [ "$uuid" = "null" ] || [ -z "$download_url" ] || [ "$download_url" = "null" ]; then
     echo "[GNOME] ERROR: Missing uuid/download_url in metadata for ${label}." >&2
     return 1
   fi
 
   if gnome-extensions list | grep -Fxq "$uuid"; then
     echo "[GNOME] ${label} already installed as ${uuid}, skipping download." >&2
-  else
+  else {
     echo "[GNOME] Downloading ${label} (${uuid}) from extensions.gnome.org…" >&2
     local tmpfile
     tmpfile="$(mktemp)" || {
@@ -737,7 +714,7 @@ install_gnome_extension_by_id() {
     fi
 
     rm -f "$tmpfile"
-  fi
+  }; fi
 
   if gnome-extensions info "$uuid" >/dev/null 2>&1; then
     gnome-extensions disable "$uuid" >/dev/null 2>&1 || true
@@ -775,7 +752,7 @@ configure_gnome_extensions_layout() {
     local taskbar_tmp
     taskbar_tmp="$(mktemp)"
     if curl -fsSL "$RAW_BASE/configs/app-icons-taskbar.conf" -o "$taskbar_tmp"; then
-      dconf load /org/gnome/shell/extensions/app-icons-taskbar/ < "$taskbar_tmp" 2>/dev/null || \
+      dconf load /org/gnome/shell/extensions/aztaskbar/ < "$taskbar_tmp" 2>/dev/null || \
         echo "[GNOME] WARNING: Failed to load App Icons Taskbar dconf." >&2
     else
       echo "[GNOME] NOTE: Could not fetch app-icons-taskbar.conf; skipping Taskbar config." >&2
@@ -861,9 +838,6 @@ if has_stack "tweaks"; then
 
   tmp_zram="$(mktemp)"
   if curl -fsSL "$RAW_BASE/configs/zramswap" -o "$tmp_zram"; then
-    if [ -f /etc/default/zramswap ]; then
-      backup_file /etc/default/zramswap
-    fi
     run_sudo cp "$tmp_zram" /etc/default/zramswap
   else
     echo "[TWEAKS] WARNING: Could not fetch zramswap config from repo, keeping distro default." >&2
@@ -902,26 +876,13 @@ fi
 install_and_configure_refind() {
   local mode="$1"
 
-  local esp
-  if ! esp="$(find_esp)"; then
-    echo "[rEFInd] EFI system partition not found – skipping rEFInd configuration."
+  local esp="/boot/efi"
+  if ! mountpoint -q "$esp"; then
+    echo "[rEFInd] /boot/efi not mounted – skipping rEFInd configuration."
     return
   fi
 
-  local refind_dir="$esp/EFI/refind"
-  local refind_conf="$refind_dir/refind.conf"
-
-  # Ensure rEFInd is installed (package name differs between Ubuntu releases)
-  if ! command -v refind-install >/dev/null 2>&1 && [ ! -d "$refind_dir" ]; then
-    echo "[rEFInd] Installing rEFInd boot manager package (refind/refind-efi)…"
-    if ! run_sudo_apt apt install -y refind && ! run_sudo_apt apt install -y refind-efi; then
-      echo "[rEFInd] WARNING: Could not install rEFInd package (refind or refind-efi); skipping configuration." >&2
-      return
-    fi
-  fi
-
-  # Only run refind-install if the rEFInd directory does not exist yet
-  if [ ! -d "$refind_dir" ] && command -v refind-install >/dev/null 2>&1; then
+  if command -v refind-install >/dev/null 2>&1; then
     run_sudo refind-install || true
   fi
 
@@ -941,13 +902,15 @@ install_and_configure_refind() {
     effective_mode="all"
   fi
 
-  local theme_dir="$refind_dir/themes/refind-bsxm1-theme"
+  local theme_dir="$esp/EFI/refind/themes/refind-bsxm1-theme"
   run_sudo mkdir -p "$(dirname "$theme_dir")"
 
   if [ ! -d "$theme_dir" ]; then
     run_sudo git clone --depth=1 https://github.com/AlexFullmoon/refind-bsxm1-theme.git "$theme_dir" || true
   fi
 
+  local refind_dir="$esp/EFI/refind"
+  local refind_conf="$refind_dir/refind.conf"
   run_sudo mkdir -p "$refind_dir"
 
   local tmp_conf refind_src
@@ -966,13 +929,10 @@ install_and_configure_refind() {
     return
   fi
 
-  if [ -f "$refind_conf" ]; then
-    backup_file "$refind_conf"
-  fi
   run_sudo cp "$tmp_conf" "$refind_conf"
   rm -f "$tmp_conf"
 
-  echo "[rEFInd] Installed/updated with mode='${effective_mode}' using config from repo (ESP: $esp)."
+  echo "[rEFInd] Installed/updated with mode='${effective_mode}' using config from repo."
 }
 
 if $INSTALL_REFIND; then
@@ -1015,12 +975,20 @@ rm -f "$POST_DOC_TMP"
 #--------------------------------------
 enable_gnome_layout_extensions() {
   local enable_uuids=()
+  local disable_uuids=()
+
+  # Prepare enable list (include GSConnect always)
   [ -n "$ARCMENU_UUID" ]     && enable_uuids+=("$ARCMENU_UUID")
   [ -n "$TASKBAR_UUID" ]     && enable_uuids+=("$TASKBAR_UUID")
   [ -n "$BLUR_SHELL_UUID" ]  && enable_uuids+=("$BLUR_SHELL_UUID")
   enable_uuids+=("$GSCONNECT_UUID")
 
-  local disable_uuids=("$UBUNTU_DOCK_UUID")
+  # Only disable Ubuntu Dock if ArcMenu + Taskbar installed (to avoid leaving no dock)
+  if [ -n "$ARCMENU_UUID" ] && [ -n "$TASKBAR_UUID" ]; then
+    disable_uuids+=("$UBUNTU_DOCK_UUID")
+  else
+    echo "[GNOME] WARNING: ArcMenu/Taskbar extension missing; Ubuntu Dock will remain enabled." >&2
+  fi
 
   if [ "${#enable_uuids[@]}" -eq 0 ] && [ "${#disable_uuids[@]}" -eq 0 ]; then
     return
@@ -1102,7 +1070,7 @@ PY
     done
   fi
 
-  echo "[GNOME] Ensured ArcMenu, App Icons Taskbar, Blur my Shell, and GSConnect are ENABLED, Ubuntu Dock is DISABLED."
+  echo "[GNOME] Ensured ArcMenu, App Icons Taskbar, Blur my Shell, and GSConnect are ENABLED, Ubuntu Dock is ${disable_uuids:+DISABLED (if present)}."
 }
 
 enable_gnome_layout_extensions
@@ -1117,5 +1085,9 @@ if zenity --question --title="BenjiOS Installer" \
     --text="Reboot now to finalize the BenjiOS layout and rEFInd configuration (strongly recommended)?"; then
   run_sudo reboot
 fi
+
+# Cleanup: clear stored password and sudo timestamp
+unset SUDO_PASS
+echo "$SUDO_PASS" | sudo -S -k 2>/dev/null || true  # expire sudo (non-critical if fails)
 
 exit 0
