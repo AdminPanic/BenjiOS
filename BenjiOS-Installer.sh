@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e
+set -Eeuo pipefail
 
 ########################################
 # BenjiOS Installer
@@ -15,7 +15,7 @@ RAW_BASE="https://raw.githubusercontent.com/AdminPanic/BenjiOS/main"
 DESKTOP_DIR="$HOME/Desktop"
 
 ZENITY_W=640
-ZENITY_H=640
+ZENITY_H=480
 
 # Filled when we install GNOME extensions
 ARCMENU_UUID=""
@@ -112,7 +112,7 @@ fi
 rm -f "$LICENSE_FILE"
 
 #--------------------------------------
-# Sudo via zenity (cached password)
+# Sudo via zenity (one-time password check)
 #--------------------------------------
 SUDO_PASS="$(zenity --password --title='BenjiOS Installer – sudo access' \
   --width="$ZENITY_W" --height=200)"
@@ -124,25 +124,59 @@ if [ -z "$SUDO_PASS" ]; then
   exit 1
 fi
 
-run_sudo() {
-  echo "$SUDO_PASS" | sudo -S "$@"
-}
-
-run_sudo_apt() {
-  echo "$SUDO_PASS" | sudo -S DEBIAN_FRONTEND=noninteractive "$@"
-}
-
-if ! echo "$SUDO_PASS" | sudo -S -v >/dev/null 2>&1; then
+if ! printf '%s\n' "$SUDO_PASS" | sudo -S -v >/dev/null 2>&1; then
   zenity --error --title="BenjiOS Installer" \
     --width="$ZENITY_W" --height=200 \
     --text="Incorrect sudo password.\nExiting."
   exit 1
 fi
 
+# Drop the password from memory as soon as possible
+unset SUDO_PASS
+
+run_sudo() {
+  sudo "$@"
+}
+
+run_sudo_apt() {
+  sudo DEBIAN_FRONTEND=noninteractive "$@"
+}
+
+backup_file() {
+  local target="$1"
+  if [ -f "$target" ]; then
+    local ts
+    ts="$(date +%Y%m%d-%H%M%S)"
+    run_sudo cp "$target" "${target}.bak.${ts}"
+  fi
+}
+
+find_esp() {
+  local candidates=(
+    /boot/efi
+    /boot/EFI
+    /efi
+  )
+  local p
+  for p in "${candidates[@]}"; do
+    if mountpoint -q "$p"; then
+      printf '%s\n' "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
 #--------------------------------------
 # Detect GPUs (AMD / NVIDIA / Intel)
 #--------------------------------------
-GPU_LINES="$(lspci | grep -Ei 'VGA|3D|Display' || true)"
+GPU_LINES=""
+
+if command -v lspci >/dev/null 2>&1; then
+  GPU_LINES="$(lspci | grep -Ei 'VGA|3D|Display' || true)"
+else
+  echo "[GPU] lspci not found; skipping detailed GPU detection."
+fi
 
 if echo "$GPU_LINES" | grep -qi "AMD"; then
   AMD_GPU_DETECTED=true
@@ -154,8 +188,10 @@ if echo "$GPU_LINES" | grep -qi "Intel"; then
   INTEL_GPU_DETECTED=true
 fi
 
-echo "[GPU] Detected GPUs:"
-echo "$GPU_LINES"
+if [ -n "$GPU_LINES" ]; then
+  echo "[GPU] Detected GPUs:"
+  echo "$GPU_LINES"
+fi
 $AMD_GPU_DETECTED    && echo "  -> AMD GPU detected"
 $NVIDIA_GPU_DETECTED && echo "  -> NVIDIA GPU detected"
 $INTEL_GPU_DETECTED  && echo "  -> Intel GPU detected"
@@ -306,8 +342,8 @@ run_sudo_apt apt update
 
 # Preseed MS core fonts EULA
 run_sudo_apt apt install -y debconf-utils
-echo "$SUDO_PASS" | sudo -S bash -c "echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | debconf-set-selections"
-echo "$SUDO_PASS" | sudo -S bash -c "echo 'ttf-mscorefonts-installer msttcorefonts/present-mscorefonts-eula note' | debconf-set-selections"
+echo | sudo -S bash -c "echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' | debconf-set-selections"
+echo | sudo -S bash -c "echo 'ttf-mscorefonts-installer msttcorefonts/present-mscorefonts-eula note' | debconf-set-selections"
 
 #--------------------------------------
 # Package aggregation
@@ -352,6 +388,7 @@ if has_stack "office"; then
   add_apt \
     openvpn \
     libreoffice \
+    gimp \
     thunderbird \
     network-manager-openvpn-gnome \
     vlc \
@@ -369,12 +406,14 @@ fi
 
 # Gaming stack
 if has_stack "gaming"; then
+  # Strategy:
+  #  - Mesa/Vulkan/runtime bits: APT (tied to kernel/driver stack)
+  #  - Game launchers/runtimes: Flatpak (usually newest stable builds)
   add_apt \
     mesa-utils \
     vulkan-tools \
     gamemode \
     mangohud \
-    lutris \
     libxkbcommon-x11-0:i386 \
     libvulkan1:i386 \
     mesa-vulkan-drivers \
@@ -494,7 +533,6 @@ fi
 # rEFInd stack
 if $INSTALL_REFIND; then
   add_apt \
-    refind \
     shim-signed \
     mokutil \
     git
@@ -557,6 +595,9 @@ APT::Periodic::Unattended-Upgrade "$days";
 APT::Periodic::AutocleanInterval "7";
 EOF_AUTO
 
+  if [ -f /etc/apt/apt.conf.d/20auto-upgrades ]; then
+    backup_file /etc/apt/apt.conf.d/20auto-upgrades
+  fi
   run_sudo cp "$tmp_file" /etc/apt/apt.conf.d/20auto-upgrades
   rm -f "$tmp_file"
 
@@ -734,7 +775,7 @@ configure_gnome_extensions_layout() {
     local taskbar_tmp
     taskbar_tmp="$(mktemp)"
     if curl -fsSL "$RAW_BASE/configs/app-icons-taskbar.conf" -o "$taskbar_tmp"; then
-      dconf load /org/gnome/shell/extensions/aztaskbar/ < "$taskbar_tmp" 2>/dev/null || \
+      dconf load /org/gnome/shell/extensions/app-icons-taskbar/ < "$taskbar_tmp" 2>/dev/null || \
         echo "[GNOME] WARNING: Failed to load App Icons Taskbar dconf." >&2
     else
       echo "[GNOME] NOTE: Could not fetch app-icons-taskbar.conf; skipping Taskbar config." >&2
@@ -755,7 +796,7 @@ configure_gnome_extensions_layout() {
     echo "[GNOME] dconf not found; cannot apply extension configs." >&2
   fi
 
-  # Taskbar icon asset
+  # Taskbar icon asset (non-fatal if missing in repo)
   local icon_target="$HOME/.local/share/icons/hicolor/48x48/apps/BenjiOS-Menu.png"
   mkdir -p "$(dirname "$icon_target")"
   if curl -fsSL "$RAW_BASE/assets/Taskbar.png" -o "$icon_target"; then
@@ -820,6 +861,9 @@ if has_stack "tweaks"; then
 
   tmp_zram="$(mktemp)"
   if curl -fsSL "$RAW_BASE/configs/zramswap" -o "$tmp_zram"; then
+    if [ -f /etc/default/zramswap ]; then
+      backup_file /etc/default/zramswap
+    fi
     run_sudo cp "$tmp_zram" /etc/default/zramswap
   else
     echo "[TWEAKS] WARNING: Could not fetch zramswap config from repo, keeping distro default." >&2
@@ -858,13 +902,26 @@ fi
 install_and_configure_refind() {
   local mode="$1"
 
-  local esp="/boot/efi"
-  if ! mountpoint -q "$esp"; then
-    echo "[rEFInd] /boot/efi not mounted – skipping rEFInd configuration."
+  local esp
+  if ! esp="$(find_esp)"; then
+    echo "[rEFInd] EFI system partition not found – skipping rEFInd configuration."
     return
   fi
 
-  if command -v refind-install >/dev/null 2>&1; then
+  local refind_dir="$esp/EFI/refind"
+  local refind_conf="$refind_dir/refind.conf"
+
+  # Ensure rEFInd is installed (package name differs between Ubuntu releases)
+  if ! command -v refind-install >/dev/null 2>&1 && [ ! -d "$refind_dir" ]; then
+    echo "[rEFInd] Installing rEFInd boot manager package (refind/refind-efi)…"
+    if ! run_sudo_apt apt install -y refind && ! run_sudo_apt apt install -y refind-efi; then
+      echo "[rEFInd] WARNING: Could not install rEFInd package (refind or refind-efi); skipping configuration." >&2
+      return
+    fi
+  fi
+
+  # Only run refind-install if the rEFInd directory does not exist yet
+  if [ ! -d "$refind_dir" ] && command -v refind-install >/dev/null 2>&1; then
     run_sudo refind-install || true
   fi
 
@@ -884,15 +941,13 @@ install_and_configure_refind() {
     effective_mode="all"
   fi
 
-  local theme_dir="$esp/EFI/refind/themes/refind-bsxm1-theme"
+  local theme_dir="$refind_dir/themes/refind-bsxm1-theme"
   run_sudo mkdir -p "$(dirname "$theme_dir")"
 
   if [ ! -d "$theme_dir" ]; then
     run_sudo git clone --depth=1 https://github.com/AlexFullmoon/refind-bsxm1-theme.git "$theme_dir" || true
   fi
 
-  local refind_dir="$esp/EFI/refind"
-  local refind_conf="$refind_dir/refind.conf"
   run_sudo mkdir -p "$refind_dir"
 
   local tmp_conf refind_src
@@ -911,10 +966,13 @@ install_and_configure_refind() {
     return
   fi
 
+  if [ -f "$refind_conf" ]; then
+    backup_file "$refind_conf"
+  fi
   run_sudo cp "$tmp_conf" "$refind_conf"
   rm -f "$tmp_conf"
 
-  echo "[rEFInd] Installed/updated with mode='${effective_mode}' using config from repo."
+  echo "[rEFInd] Installed/updated with mode='${effective_mode}' using config from repo (ESP: $esp)."
 }
 
 if $INSTALL_REFIND; then
