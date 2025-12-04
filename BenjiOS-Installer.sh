@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# Cosmetic: silence noisy Mesa / libEGL warnings from GTK/Zenity
+export LIBGL_DEBUG=quiet
+export MESA_DEBUG=silent
+export EGL_LOG_LEVEL=error
+
 ########################################
 # BenjiOS Installer
 # Target: Ubuntu 25.10+ (GNOME, Wayland)
