@@ -73,6 +73,16 @@ if ! command -v zenity >/dev/null 2>&1; then
     sudo apt update && sudo DEBIAN_FRONTEND=noninteractive apt install -y zenity
 fi
 
+# ---- add this wrapper immediately after the block above ----
+# Wrap zenity so its noisy GPU/Mesa warnings don't spam the terminal.
+# All stderr from zenity goes to /dev/null, but the script's own errors/logs stay visible.
+ZENITY_BIN="$(command -v zenity || echo /usr/bin/zenity)"
+zenity() {
+    "$ZENITY_BIN" "$@" 2>/dev/null
+}
+export -f zenity
+# ---- end wrapper ----
+
 # Ensure Desktop directory exists
 mkdir -p "$DESKTOP_DIR"
 
