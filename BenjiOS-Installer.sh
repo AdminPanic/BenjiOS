@@ -632,34 +632,34 @@ configure_gnome_theme_and_power() {
     fi
 
     local IF_SCHEMA="org.gnome.desktop.interface"
-    echo "[THEME] Applying BenjiOS GNOME look (dark theme + green accent)…"
+echo "[THEME] Applying BenjiOS GNOME look (dark theme + olive accent)…"
 
-    # Dark mode (for GNOME and Ubuntu-specific schema)
-    gsettings set "$IF_SCHEMA" color-scheme 'prefer-dark' 2>/dev/null || true
-    if gsettings writable org.gnome.shell.ubuntu color-scheme >/dev/null 2>&1; then
-        gsettings set org.gnome.shell.ubuntu color-scheme 'dark' 2>/dev/null || true
+# Dark mode
+gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' || true
+if gsettings writable org.gnome.shell.ubuntu color-scheme; then
+    gsettings set org.gnome.shell.ubuntu color-scheme 'dark' || true
+fi
+
+# GTK theme, icons, WM theme, sound theme
+gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-olive-dark' || true
+gsettings set org.gnome.desktop.interface icon-theme 'Yaru-olive-dark' || true
+gsettings set org.gnome.desktop.wm.preferences theme 'Yaru-olive-dark' || true
+gsettings set org.gnome.desktop.sound theme-name 'Yaru' || true
+
+# Accent color (if supported)
+if gsettings range org.gnome.desktop.interface accent-color >/dev/null 2>&1; then
+    gsettings set org.gnome.desktop.interface accent-color 'olive' || true
+    # Apply through Yaru Colors switcher if available
+    if [ -x /usr/libexec/yaru-colors-switcher ]; then
+        /usr/libexec/yaru-colors-switcher --color olive --theme dark || true
+    elif [ -x /usr/lib/yaru-colors-switcher ]; then
+        /usr/lib/yaru-colors-switcher --color olive --theme dark || true
     fi
-
-    # GTK theme, icons, sound theme
-    gsettings set "$IF_SCHEMA" gtk-theme 'Yaru-dark' 2>/dev/null || true
-    gsettings set "$IF_SCHEMA" icon-theme 'Yaru' 2>/dev/null || true
-    gsettings set org.gnome.desktop.sound theme-name 'Yaru' 2>/dev/null || true
-
-    # Accent color (if supported by GNOME version)
-    if gsettings range "$IF_SCHEMA" accent-color >/dev/null 2>&1; then
-        gsettings set "$IF_SCHEMA" accent-color 'green' 2>/dev/null || true
-
-        # Also apply through yaru-colors-switcher if available (for complete theming)
-        if [ -x /usr/libexec/yaru-colors-switcher ]; then
-            /usr/libexec/yaru-colors-switcher --color green --theme dark || true
-        elif [ -x /usr/lib/yaru-colors-switcher ]; then
-            /usr/lib/yaru-colors-switcher --color green --theme dark || true
-        fi
-    else
-        # Fallback for older Ubuntu (no accent-color key): use pre-made green theme variant
-        gsettings set "$IF_SCHEMA" gtk-theme 'Yaru-green-dark' 2>/dev/null || \
-        gsettings set "$IF_SCHEMA" gtk-theme 'Yaru-green' 2>/dev/null || true
-    fi
+else
+    # Fallback for older Ubuntu (no accent-color key)
+    gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-olive-dark' || \
+    gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-olive' || true
+fi
 
     # Rebuild icon caches (best effort, no harm if fails)
     [ -d "$HOME/.icons" ] && gtk-update-icon-cache "$HOME/.icons" >/dev/null 2>&1 || true
@@ -825,6 +825,20 @@ configure_gnome_extensions_layout() {
 }
 
 configure_gnome_extensions_layout
+
+# Apply GNOME Terminal (Ptyxis) configuration
+if command -v dconf >/dev/null 2>&1; then
+    tmp_term="$(mktemp)"
+    if curl -fsSL "$RAW_BASE/configs/terminal.conf" -o "$tmp_term"; then
+        dconf load /org/gnome/Ptyxis/ < "$tmp_term" 2>/dev/null || \
+            echo "[GNOME] WARNING: Failed to load Terminal settings." >&2
+    else
+        echo "[GNOME] NOTE: Could not fetch terminal.conf; skipping Terminal config." >&2
+    fi
+    rm -f "$tmp_term"
+else
+    echo "[GNOME] 'dconf' not found; cannot apply Terminal config." >&2
+fi
 
 #--------------------------------------
 # Stack-specific system configuration
