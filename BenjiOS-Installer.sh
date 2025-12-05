@@ -89,6 +89,9 @@ mkdir -p "$DESKTOP_DIR"
 # Set non-interactive for all apt/apt-get usage in this script
 export DEBIAN_FRONTEND=noninteractive
 
+# Trap any unexpected errors to notify user and exit gracefully
+trap 'zenity --error --title="BenjiOS Installer" --width="$ZENITY_W" --height=150 --text="Installation encountered an error and cannot continue."; sudo -k; exit 1' ERR
+
 #--------------------------------------
 # License Agreement Dialog
 #--------------------------------------
@@ -119,8 +122,8 @@ zenity --text-info \
 
 if [ $? -ne 0 ]; then
     zenity --info --title="BenjiOS Installer" \
-        --width="$ZENITY_W" --height=200 \
-        --text="Installation cancelled."
+           --width="$ZENITY_W" --height=200 \
+           --text="Installation cancelled."
     rm -f "$LICENSE_FILE"
     exit 0
 fi
@@ -188,87 +191,331 @@ find_esp() {
 }
 
 #--------------------------------------
-# Detect GPUs (AMD / NVIDIA / Intel)
+# Helper: GNOME appearance + power profile
 #--------------------------------------
-GPU_LINES=""
-if command -v lspci >/dev/null 2>&1; then
-    GPU_LINES="$(lspci | grep -Ei 'VGA|3D|Display' || true)"
-else
-    echo "[GPU] lspci not found; skipping detailed GPU detection." >&2
-fi
+configure_gnome_theme_and_power() {
+    if ! command -v gsettings >/dev/null 2>&1; then
+        echo "[THEME] 'gsettings' not found – skipping desktop theming." >&2
+        return
+    fi
 
-if echo "$GPU_LINES" | grep -qi "AMD"; then
-    AMD_GPU_DETECTED=true
-fi
-if echo "$GPU_LINES" | grep -qi "NVIDIA"; then
-    NVIDIA_GPU_DETECTED=true
-fi
-if echo "$GPU_LINES" | grep -qi "Intel"; then
-    INTEL_GPU_DETECTED=true
-fi
+    local IF_SCHEMA="org.gnome.desktop.interface"
+    echo "[THEME] Applying BenjiOS GNOME look (dark theme + olive accent)…"
 
-if [ -n "$GPU_LINES" ]; then
-    echo "[GPU] Detected GPUs:"
-    echo "$GPU_LINES"
-fi
-$AMD_GPU_DETECTED    && echo "  -> AMD GPU detected"
-$NVIDIA_GPU_DETECTED && echo "  -> NVIDIA GPU detected"
-$INTEL_GPU_DETECTED  && echo "  -> Intel GPU detected"
+    # Dark mode
+    gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' || true
+    if gsettings writable org.gnome.shell.ubuntu color-scheme; then
+        gsettings set org.gnome.shell.ubuntu color-scheme 'dark' || true
+    fi
+
+    # GTK theme, icons, WM theme, sound theme
+    gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-olive-dark' || true
+    gsettings set org.gnome.desktop.interface icon-theme 'Yaru-olive-dark' || true
+    gsettings set org.gnome.desktop.wm.preferences theme 'Yaru-olive-dark' || true
+    gsettings set org.gnome.desktop.sound theme-name 'Yaru' || true
+
+    # Accent color (if supported)
+    if gsettings range org.gnome.desktop.interface accent-color >/dev/null 2>&1; then
+        gsettings set org.gnome.desktop.interface accent-color 'olive' || true
+        # Apply through Yaru Colors switcher if available
+        if [ -x /usr/libexec/yaru-colors-switcher ]; then
+            /usr/libexec/yaru-colors-switcher --color olive --theme dark || true
+        elif [ -x /usr/lib/yaru-colors-switcher ]; then
+            /usr/lib/yaru-colors-switcher --color olive --theme dark || true
+        fi
+    else
+        # Fallback for older Ubuntu (no accent-color key)
+        gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-olive-dark' || \
+        gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-olive' || true
+    fi
+
+    # Rebuild icon caches (best effort, no harm if fails)
+    [ -d "$HOME/.icons" ] && gtk-update-icon-cache "$HOME/.icons" >/dev/null 2>&1 || true
+    [ -d /usr/share/icons/Yaru ] && run_sudo gtk-update-icon-cache /usr/share/icons/Yaru >/dev/null 2>&1 || true
+
+    # Set power profile to Performance if available
+    if command -v powerprofilesctl >/dev/null 2>&1; then
+        if powerprofilesctl list 2>/dev/null | grep -q "performance"; then
+            powerprofilesctl set performance >/dev/null 2>&1 || true
+        fi
+    fi
+}
 
 #--------------------------------------
-# Detect virtualization (KVM/Proxmox, VMware, VirtualBox, Hyper-V)
+# Helpers: GNOME extensions (ArcMenu, Taskbar, Blur My Shell)
 #--------------------------------------
-if command -v systemd-detect-virt >/dev/null 2>&1; then
-    VIRT_TYPE="$(systemd-detect-virt 2>/dev/null || echo "none")"
-else
-    VIRT_TYPE="none"
-fi
+ensure_gnome_extension_tools() {
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "[GNOME] 'curl' not found; cannot install extensions." >&2
+        return 1
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "[GNOME] 'jq' not found; cannot install extensions." >&2
+        return 1
+    fi
+    if ! command -v gnome-extensions >/dev/null 2>&1; then
+        echo "[GNOME] 'gnome-extensions' CLI not found; cannot install extensions." >&2
+        return 1
+    fi
+    return 0
+}
 
-case "$VIRT_TYPE" in
-    kvm|qemu)
-        IS_VIRT=true; IS_KVM=true ;;
-    vmware)
-        IS_VIRT=true; IS_VMWARE=true ;;
-    oracle|virtualbox)
-        IS_VIRT=true; IS_VBOX=true ;;
-    microsoft|hyperv)
-        IS_VIRT=true; IS_HYPERV=true ;;
-    *)
-        IS_VIRT=false ;;
-esac
+install_gnome_extension_by_id() {
+    local ext_id="$1"
+    local label="$2"
 
-echo "[VIRT] Detected virtualization type: $VIRT_TYPE"
-$IS_KVM     && echo "  -> KVM/QEMU guest (includes Proxmox VMs)"
-$IS_VMWARE  && echo "  -> VMware guest"
-$IS_VBOX    && echo "  -> VirtualBox guest"
-$IS_HYPERV  && echo "  -> Hyper-V guest"
+    if ! command -v gnome-extensions >/dev/null 2>&1; then
+        echo "[GNOME] ERROR: gnome-extensions CLI missing; cannot install ${label}." >&2
+        return 1
+    fi
 
-# >>> New: Secure Boot detection <<<
-# Check if Secure Boot is enabled
-SB_ENABLED=false
-if [ -r /sys/firmware/efi/efivars/SecureBoot-* ]; then
-    sb_val=$(od -An -t u1 -j 4 -N 1 /sys/firmware/efi/efivars/SecureBoot-* 2>/dev/null | awk '{print $1}')
-    if [ "$sb_val" = "1" ]; then SB_ENABLED=true; fi
-fi
+    # Determine current GNOME Shell major version for extension compatibility
+    local shell_ver=""
+    if command -v gnome-shell >/dev/null 2>&1; then
+        shell_ver="$(gnome-shell --version | awk '{print $3}' | cut -d. -f1)"
+    fi
+
+    # Fetch extension metadata
+    local url="https://extensions.gnome.org/extension-info/?pk=${ext_id}"
+    if [ -n "$shell_ver" ]; then
+        url="${url}&shell_version=${shell_ver}"
+    fi
+    local json uuid download_url
+    if ! json="$(curl -fsSL "$url")"; then
+        echo "[GNOME] ERROR: Failed to fetch metadata for ${label} (ID ${ext_id})." >&2
+        return 1
+    fi
+
+    uuid="$(printf '%s\n' "$json" | jq -r '.uuid')"
+    download_url="$(printf '%s\n' "$json" | jq -r '.download_url')"
+
+    if [ -z "$uuid" ] || [ "$uuid" = "null" ] || [ -z "$download_url" ] || [ "$download_url" = "null" ]; then
+        echo "[GNOME] ERROR: Missing uuid or download_url in metadata for ${label}." >&2
+        return 1
+    fi
+
+    if gnome-extensions list | grep -Fxq "$uuid"; then
+        echo "[GNOME] ${label} already installed (uuid: ${uuid}), skipping download." >&2
+    else
+        echo "[GNOME] Downloading ${label} (${uuid}) from extensions.gnome.org…" >&2
+        local tmpfile
+        tmpfile="$(mktemp)" || {
+            echo "[GNOME] ERROR: mktemp failed for ${label}." >&2
+            return 1
+        }
+
+        if ! curl -fsSL "https://extensions.gnome.org${download_url}" -o "$tmpfile"; then
+            echo "[GNOME] ERROR: Failed to download ${label} extension archive." >&2
+            rm -f "$tmpfile"
+            return 1
+        fi
+
+        echo "[GNOME] Installing ${label} extension via gnome-extensions..." >&2
+        if ! gnome-extensions install --force "$tmpfile"; then
+            echo "[GNOME] ERROR: gnome-extensions install failed for ${label}." >&2
+            rm -f "$tmpfile"
+            return 1
+        fi
+        rm -f "$tmpfile"
+    fi
+
+    # Disable the extension immediately after install (to avoid any interference during setup)
+    if gnome-extensions info "$uuid" >/dev/null 2>&1; then
+        gnome-extensions disable "$uuid" >/dev/null 2>&1 || true
+        echo "[GNOME] ${label} installed as ${uuid} and currently DISABLED (will enable at end)." >&2
+    fi
+
+    # Return the UUID (so we can capture it in a variable)
+    printf '%s\n' "$uuid"
+}
+
+configure_gnome_extensions_layout() {
+    echo "[GNOME] === Configuring GNOME Shell extensions (ArcMenu, Taskbar, Blur my Shell) ==="
+    if ! ensure_gnome_extension_tools; then
+        echo "[GNOME] Skipping GNOME extension installation due to missing tools." >&2
+        return
+    fi
+
+    # Install extensions and capture their UUIDs (or blank if failed)
+    ARCMENU_UUID="$(install_gnome_extension_by_id 3628 "ArcMenu" || true)"
+    TASKBAR_UUID="$(install_gnome_extension_by_id 4944 "App Icons Taskbar" || true)"
+    BLUR_SHELL_UUID="$(install_gnome_extension_by_id 3193 "Blur my Shell" || true)"
+
+    # Apply pre-configured settings for each extension via dconf
+    if command -v dconf >/dev/null 2>&1; then
+        # ArcMenu configuration
+        local arcmenu_tmp; arcmenu_tmp="$(mktemp)"
+        if curl -fsSL "$RAW_BASE/configs/arcmenu.conf" -o "$arcmenu_tmp"; then
+            dconf load /org/gnome/shell/extensions/arcmenu/ < "$arcmenu_tmp" 2>/dev/null || \
+                echo "[GNOME] WARNING: Failed to load ArcMenu settings." >&2
+        else
+            echo "[GNOME] NOTE: Could not fetch arcmenu.conf; skipping ArcMenu config." >&2
+        fi
+        rm -f "$arcmenu_tmp"
+
+        # App Icons Taskbar configuration
+        local taskbar_tmp; taskbar_tmp="$(mktemp)"
+        if curl -fsSL "$RAW_BASE/configs/app-icons-taskbar.conf" -o "$taskbar_tmp"; then
+            dconf load /org/gnome/shell/extensions/aztaskbar/ < "$taskbar_tmp" 2>/dev/null || \
+                echo "[GNOME] WARNING: Failed to load App Icons Taskbar settings." >&2
+        else
+            echo "[GNOME] NOTE: Could not fetch app-icons-taskbar.conf; skipping Taskbar config." >&2
+        fi
+        rm -f "$taskbar_tmp"
+
+        # Blur My Shell configuration
+        local blur_tmp; blur_tmp="$(mktemp)"
+        if curl -fsSL "$RAW_BASE/configs/blur-my-shell.conf" -o "$blur_tmp"; then
+            dconf load /org/gnome/shell/extensions/blur-my-shell/ < "$blur_tmp" 2>/dev/null || \
+                echo "[GNOME] WARNING: Failed to load Blur My Shell settings." >&2
+        else
+            echo "[GNOME] NOTE: Could not fetch blur-my-shell.conf; skipping Blur My Shell config." >&2
+        fi
+        rm -f "$blur_tmp"
+    else
+        echo "[GNOME] 'dconf' not found; cannot apply GNOME extension configs." >&2
+    fi
+
+    # Place custom icon for ArcMenu's menu button (non-fatal if fails)
+    local icon_target="$HOME/.local/share/icons/hicolor/48x48/apps/BenjiOS-Menu.png"
+    mkdir -p "$(dirname "$icon_target")"
+    if curl -fsSL "$RAW_BASE/assets/Taskbar.png" -o "$icon_target"; then
+        if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+            gtk-update-icon-cache "$HOME/.local/share/icons/hicolor" >/dev/null 2>&1 || true
+        fi
+    else
+        echo "[GNOME] NOTE: Could not fetch Taskbar.png; ArcMenu will use default icon." >&2
+    fi
+
+    echo "[GNOME] ArcMenu, App Icons Taskbar, and Blur My Shell extensions are installed (disabled for now; will be enabled at the end)."
+}
+
+enable_gnome_layout_extensions() {
+    local enable_uuids=()
+    local disable_uuids=()
+
+    # Prepare list of extensions to enable (always include GSConnect)
+    [ -n "$ARCMENU_UUID" ]    && enable_uuids+=("$ARCMENU_UUID")
+    [ -n "$TASKBAR_UUID" ]    && enable_uuids+=("$TASKBAR_UUID")
+    [ -n "$BLUR_SHELL_UUID" ] && enable_uuids+=("$BLUR_SHELL_UUID")
+    enable_uuids+=("$GSCONNECT_UUID")
+
+    # If ArcMenu + Taskbar are installed, disable Ubuntu Dock (to avoid duplicate launchers)
+    if [ -n "$ARCMENU_UUID" ] && [ -n "$TASKBAR_UUID" ]; then
+        disable_uuids+=("$UBUNTU_DOCK_UUID")
+    else
+        echo "[GNOME] WARNING: ArcMenu and/or Taskbar extension missing; Ubuntu Dock will remain enabled." >&2
+    fi
+
+    if [ "${#enable_uuids[@]}" -eq 0 ] && [ "${#disable_uuids[@]}" -eq 0 ]; then
+        return 0  # nothing to do
+    fi
+
+    # Use gsettings to persist extension enable/disable states
+    if command -v gsettings >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+        # Merge enable list with currently enabled extensions
+        local current_enabled merged_enabled
+        current_enabled="$(gsettings get org.gnome.shell enabled-extensions 2>/dev/null || echo "[]")"
+        current_enabled="${current_enabled#@as }"  # remove any GVariant type prefix
+        merged_enabled="$(python3 - "$current_enabled" "${enable_uuids[@]}" << 'PYCODE'
+import ast, sys
+current = sys.argv[1]
+uuids = sys.argv[2:]
+try:
+    arr = ast.literal_eval(current)
+    if not isinstance(arr, list):
+        arr = []
+except Exception:
+    arr = []
+for u in uuids:
+    if u and u not in arr:
+        arr.append(u)
+print(str(arr))
+PYCODE
+)" || merged_enabled=""
+
+        if [ -n "$merged_enabled" ]; then
+            gsettings set org.gnome.shell enabled-extensions "$merged_enabled" 2>/dev/null || true
+        fi
+
+        # Update disabled-extensions list: first remove any that we are enabling (to avoid conflicts)
+        local current_disabled cleaned_disabled final_disabled
+        current_disabled="$(gsettings get org.gnome.shell disabled-extensions 2>/dev/null || echo "[]")"
+        current_disabled="${current_disabled#@as }"
+        cleaned_disabled="$(python3 - "$current_disabled" "${enable_uuids[@]}" << 'PYCODE'
+import ast, sys
+current = sys.argv[1]
+enabled = set(sys.argv[2:])
+try:
+    arr = ast.literal_eval(current)
+    if not isinstance(arr, list):
+        arr = []
+except Exception:
+    arr = []
+arr = [x for x in arr if x not in enabled]
+print(str(arr))
+PYCODE
+)" || cleaned_disabled=""
+
+        # Then add any extensions we want to disable (Ubuntu Dock) to the disabled list
+        final_disabled="$(python3 - "$cleaned_disabled" "${disable_uuids[@]}" << 'PYCODE'
+import ast, sys
+current = sys.argv[1]
+to_disable = sys.argv[2:]
+try:
+    arr = ast.literal_eval(current)
+    if not isinstance(arr, list):
+        arr = []
+except Exception:
+    arr = []
+for u in to_disable:
+    if u and u not in arr:
+        arr.append(u)
+print(str(arr))
+PYCODE
+)" || final_disabled=""
+
+        if [ -n "$final_disabled" ]; then
+            gsettings set org.gnome.shell disabled-extensions "$final_disabled" 2>/dev/null || true
+        fi
+    fi
+
+    # Enable/disable via gnome-extensions (applies changes immediately in this session)
+    if command -v gnome-extensions >/dev/null 2>&1; then
+        for uuid in "${enable_uuids[@]}"; do
+            [ -n "$uuid" ] && gnome-extensions enable "$uuid" >/dev/null 2>&1 || true
+        done
+        for uuid in "${disable_uuids[@]}"; do
+            [ -n "$uuid" ] && gnome-extensions disable "$uuid" >/dev/null 2>&1 || true
+        done
+    fi
+
+    # Log the result
+    if [ "${#disable_uuids[@]}" -gt 0 ]; then
+        echo "[GNOME] Ensured extensions (ArcMenu, Taskbar, Blur My Shell, GSConnect) are ENABLED, and Ubuntu Dock is DISABLED."
+    else
+        echo "[GNOME] Ensured extensions (ArcMenu, Taskbar, Blur My Shell, GSConnect) are ENABLED. (Ubuntu Dock left enabled)"
+    fi
+}
 
 #--------------------------------------
 # Stack selection (Zenity checklist)
 #--------------------------------------
 STACK_SELECTION="$(zenity --list \
-   --title="BenjiOS Installer – Component Selection" \
-   --width="$ZENITY_W" --height="$ZENITY_H" \
-   --text="Select which stacks to install.\n\nCore system tools, GPU tweaks, and VM guest integrations (based on detected hardware) are ALWAYS installed.\nYou can re-run this script later to add more stacks." \
-   --checklist --separator=" " \
-   --column="Install" --column="ID" --column="Description" \
-   TRUE  "office"        "Office, mail, basic media, RDP client" \
-   TRUE  "gaming"        "Gaming stack: Steam, Heroic, Lutris, Proton tools" \
-   TRUE  "monitoring"    "Monitoring: sensors, btop, nvtop, psensor, disk health" \
-   TRUE  "backup_tools"  "Backup tools: Timeshift, Déjà Dup, Borg, Vorta" \
-   TRUE  "management"    "Remote management: SSH server, xRDP, firewall, WoL" \
-   TRUE  "tweaks"        "Performance tweaks: zram compressed swap + earlyoom" \
-   TRUE  "auto_updates"  "Automatic APT updates (unattended-upgrades)" \
-   FALSE "refind"        "rEFInd boot manager with BsxM1 theme (advanced multi-boot)" \
-   --extra-button="Advanced" \
+    --title="BenjiOS Installer – Component Selection" \
+    --width="$ZENITY_W" --height="$ZENITY_H" \
+    --text="Select which stacks to install.\n\nCore system tools, GPU tweaks, and VM guest integrations (based on detected hardware) are ALWAYS installed.\nYou can re-run this script later to add more stacks." \
+    --checklist --separator=" " \
+    --column="Install" --column="ID" --column="Description" \
+    TRUE  "office"        "Office, mail, basic media, RDP client" \
+    TRUE  "gaming"        "Gaming stack: Steam, Heroic, Lutris, Proton tools" \
+    TRUE  "monitoring"    "Monitoring: sensors, btop, nvtop, psensor, disk health" \
+    TRUE  "backup_tools"  "Backup tools: Timeshift, Déjà Dup, Borg, Vorta" \
+    TRUE  "management"    "Remote management: SSH server, xRDP, firewall, WoL" \
+    TRUE  "tweaks"        "Performance tweaks: zram compressed swap + earlyoom" \
+    TRUE  "auto_updates"  "Automatic APT updates (unattended-upgrades)" \
+    FALSE "refind"        "rEFInd boot manager with BsxM1 theme (advanced multi-boot)" \
+    --extra-button="Advanced" \
 )" || true
 
 # >>> New: Advanced options handling <<<
@@ -281,16 +528,18 @@ if [ "$STACK_SELECTION" = "Advanced" ]; then
         --checklist --separator=" " \
         --column="Run" --column="ID" --column="Description" \
         FALSE "repair_refind" "Repair rEFInd boot manager (reinstall files and ensure configured)" \
-        FALSE "theme" "Reapply BenjiOS GNOME theme and settings" \
+        FALSE "theme"         "Reapply BenjiOS GNOME theme and settings" \
         FALSE "update_system" "Update system packages and apps (APT, Flatpak, Snap)" \
-        FALSE "change_mode" "Change rEFInd boot display mode (single, dual, or all entries)" \
+        FALSE "change_mode"   "Change rEFInd boot display mode (single, dual, or all entries)" \
     )" || true
+
     if [ -z "$ADV_TASKS" ]; then
         zenity --info --title="BenjiOS Installer" \
                --width="$ZENITY_W" --height=150 \
                --text="No advanced tasks selected. Exiting."
         exit 0
     fi
+
     for task in $ADV_TASKS; do
         case "$task" in
             repair_refind)
@@ -365,11 +614,12 @@ if [ "$STACK_SELECTION" = "Advanced" ]; then
                 fi
                 ;;
             change_mode)
-                if [ ! -d /sys/firmware/efi ] || [ -z "$esp" ] || [ ! -d "$esp/EFI/refind" ]; then
+                if [ ! -d /sys/firmware/efi ] || [ ! -d "$(find_esp)/EFI/refind" ]; then
                     zenity --error --title="BenjiOS – rEFInd Boot Mode" \
                            --width="$ZENITY_W" --height=150 \
                            --text="Cannot change rEFInd mode: rEFInd is not installed."
                 else
+                    esp="$(find_esp)"
                     NEW_MODE="$(zenity --list \
                         --title="BenjiOS – Change rEFInd Boot Mode" \
                         --width="$ZENITY_W" --height="$ZENITY_H" \
@@ -394,6 +644,7 @@ if [ "$STACK_SELECTION" = "Advanced" ]; then
                 ;;
         esac
     done
+
     zenity --info --title="BenjiOS Installer" \
            --width="$ZENITY_W" --height=200 \
            --text="Selected advanced tasks have been completed."
@@ -441,14 +692,14 @@ if has_stack "refind"; then
         INSTALL_REFIND=true
         # Ask rEFInd boot mode
         REFIND_BOOT_MODE="$(zenity --list \
-          --title="BenjiOS – rEFInd Boot Mode" \
-          --width="$ZENITY_W" --height="$ZENITY_H" \
-          --text="Choose how rEFInd should present boot entries:\n\n• Single Boot Ubuntu\n• Dual Boot Ubuntu + Windows\n• Show all detected entries" \
-          --radiolist \
-          --column="Use" --column="ID" --column="Description" \
-          TRUE  "dual"   "Dual Boot: Ubuntu + Windows, hide auxiliary/irrelevant entries" \
-          FALSE "single" "Single Boot: Ubuntu only, hide Windows entries" \
-          FALSE "all"    "Show all detected entries (Linux, Windows, recovery, etc.)" \
+            --title="BenjiOS – rEFInd Boot Mode" \
+            --width="$ZENITY_W" --height="$ZENITY_H" \
+            --text="Choose how rEFInd should present boot entries:\n\n• Single Boot Ubuntu\n• Dual Boot Ubuntu + Windows\n• Show all detected entries" \
+            --radiolist \
+            --column="Use" --column="ID" --column="Description" \
+            TRUE  "dual"   "Dual Boot: Ubuntu + Windows, hide auxiliary/irrelevant entries" \
+            FALSE "single" "Single Boot: Ubuntu only, hide Windows entries" \
+            FALSE "all"    "Show all detected entries (Linux, Windows, recovery, etc.)" \
         )" || true
 
         case "$REFIND_BOOT_MODE" in
@@ -468,6 +719,7 @@ if has_stack "refind"; then
                 TRUE  "mok"     "Install rEFInd with Secure Boot support (enroll key via MOK on reboot)" \
                 FALSE "no_mok"  "Install rEFInd without Secure Boot support (disable Secure Boot manually later)" \
             )" || true
+
             case "$SB_REFIND_CHOICE" in
                 mok)
                     REFIND_ENROLL_KEY=true
@@ -483,8 +735,8 @@ if has_stack "refind"; then
 
     else
         zenity --warning --title="BenjiOS – rEFInd Skipped" \
-            --width="$ZENITY_W" --height=150 \
-            --text="rEFInd boot manager requires UEFI, but this system is not UEFI.\nSkipping rEFInd installation."
+               --width="$ZENITY_W" --height=150 \
+               --text="rEFInd boot manager requires UEFI, but this system is not UEFI.\nSkipping rEFInd installation."
         INSTALL_REFIND=false
     fi
 fi
@@ -527,6 +779,11 @@ run_sudo_apt apt update
 run_sudo_apt apt full-upgrade -y \
     -o Dpkg::Options::=--force-confdef \
     -o Dpkg::Options::=--force-confnew
+
+# Ensure AppArmor profiles are up-to-date (fix Flatpak revokefs issue on Ubuntu 25.10)
+if systemctl is-active --quiet apparmor.service 2>/dev/null; then
+    run_sudo systemctl reload apparmor.service || run_sudo systemctl restart apparmor.service || true
+fi
 
 # Enable multiarch for 32-bit packages (for gaming/wine compatibility)
 run_sudo dpkg --add-architecture i386 || true
@@ -775,6 +1032,9 @@ if [ "${#FLATPAK_PKGS[@]}" -gt 0 ]; then
     flatpak install -y flathub "${FLATPAK_PKGS[@]}" || true
 fi
 
+configure_gnome_theme_and_power
+configure_gnome_extensions_layout
+
 #--------------------------------------
 # Helper: configure auto updates (unattended-upgrades)
 #--------------------------------------
@@ -802,210 +1062,6 @@ EOF
 if $AUTO_UPDATES_SELECTED && [ -n "$UPDATES_DAYS" ]; then
     setup_auto_updates "$UPDATES_DAYS"
 fi
-
-#--------------------------------------
-# Helper: GNOME appearance + power profile
-#--------------------------------------
-configure_gnome_theme_and_power() {
-    if ! command -v gsettings >/dev/null 2>&1; then
-        echo "[THEME] 'gsettings' not found – skipping desktop theming." >&2
-        return
-    fi
-
-    local IF_SCHEMA="org.gnome.desktop.interface"
-    echo "[THEME] Applying BenjiOS GNOME look (dark theme + olive accent)…"
-
-    # Dark mode
-    gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' || true
-    if gsettings writable org.gnome.shell.ubuntu color-scheme; then
-        gsettings set org.gnome.shell.ubuntu color-scheme 'dark' || true
-    fi
-
-    # GTK theme, icons, WM theme, sound theme
-    gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-olive-dark' || true
-    gsettings set org.gnome.desktop.interface icon-theme 'Yaru-olive-dark' || true
-    gsettings set org.gnome.desktop.wm.preferences theme 'Yaru-olive-dark' || true
-    gsettings set org.gnome.desktop.sound theme-name 'Yaru' || true
-
-    # Accent color (if supported)
-    if gsettings range org.gnome.desktop.interface accent-color >/dev/null 2>&1; then
-        gsettings set org.gnome.desktop.interface accent-color 'olive' || true
-        # Apply through Yaru Colors switcher if available
-        if [ -x /usr/libexec/yaru-colors-switcher ]; then
-            /usr/libexec/yaru-colors-switcher --color olive --theme dark || true
-        elif [ -x /usr/lib/yaru-colors-switcher ]; then
-            /usr/lib/yaru-colors-switcher --color olive --theme dark || true
-        fi
-    else
-        # Fallback for older Ubuntu (no accent-color key)
-        gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-olive-dark' || \
-        gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-olive' || true
-    fi
-
-    # Rebuild icon caches (best effort, no harm if fails)
-    [ -d "$HOME/.icons" ] && gtk-update-icon-cache "$HOME/.icons" >/dev/null 2>&1 || true
-    [ -d /usr/share/icons/Yaru ] && run_sudo gtk-update-icon-cache /usr/share/icons/Yaru >/dev/null 2>&1 || true
-
-    # Set power profile to Performance if available
-    if command -v powerprofilesctl >/dev/null 2>&1; then
-        if powerprofilesctl list 2>/dev/null | grep -q "performance"; then
-            powerprofilesctl set performance >/dev/null 2>&1 || true
-        fi
-    fi
-}
-
-configure_gnome_theme_and_power
-
-#--------------------------------------
-# Helpers: GNOME extensions (ArcMenu, Taskbar, Blur My Shell)
-#--------------------------------------
-ensure_gnome_extension_tools() {
-    if ! command -v curl >/dev/null 2>&1; then
-        echo "[GNOME] 'curl' not found; cannot install extensions." >&2
-        return 1
-    fi
-    if ! command -v jq >/dev/null 2>&1; then
-        echo "[GNOME] 'jq' not found; cannot install extensions." >&2
-        return 1
-    fi
-    if ! command -v gnome-extensions >/dev/null 2>&1; then
-        echo "[GNOME] 'gnome-extensions' CLI not found; cannot install extensions." >&2
-        return 1
-    fi
-    return 0
-}
-
-install_gnome_extension_by_id() {
-    local ext_id="$1"
-    local label="$2"
-
-    if ! command -v gnome-extensions >/dev/null 2>&1; then
-        echo "[GNOME] ERROR: gnome-extensions CLI missing; cannot install ${label}." >&2
-        return 1
-    fi
-
-    # Determine current GNOME Shell major version for extension compatibility
-    local shell_ver=""
-    if command -v gnome-shell >/dev/null 2>&1; then
-        shell_ver="$(gnome-shell --version | awk '{print $3}' | cut -d. -f1)"
-    fi
-
-    # Fetch extension metadata
-    local url="https://extensions.gnome.org/extension-info/?pk=${ext_id}"
-    if [ -n "$shell_ver" ]; then
-        url="${url}&shell_version=${shell_ver}"
-    fi
-    local json uuid download_url
-    if ! json="$(curl -fsSL "$url")"; then
-        echo "[GNOME] ERROR: Failed to fetch metadata for ${label} (ID ${ext_id})." >&2
-        return 1
-    fi
-
-    uuid="$(printf '%s\n' "$json" | jq -r '.uuid')"
-    download_url="$(printf '%s\n' "$json" | jq -r '.download_url')"
-
-    if [ -z "$uuid" ] || [ "$uuid" = "null" ] || [ -z "$download_url" ] || [ "$download_url" = "null" ]; then
-        echo "[GNOME] ERROR: Missing uuid or download_url in metadata for ${label}." >&2
-        return 1
-    fi
-
-    if gnome-extensions list | grep -Fxq "$uuid"; then
-        echo "[GNOME] ${label} already installed (uuid: ${uuid}), skipping download." >&2
-    else
-        echo "[GNOME] Downloading ${label} (${uuid}) from extensions.gnome.org…" >&2
-        local tmpfile
-        tmpfile="$(mktemp)" || {
-            echo "[GNOME] ERROR: mktemp failed for ${label}." >&2
-            return 1
-        }
-
-        if ! curl -fsSL "https://extensions.gnome.org${download_url}" -o "$tmpfile"; then
-            echo "[GNOME] ERROR: Failed to download ${label} extension archive." >&2
-            rm -f "$tmpfile"
-            return 1
-        fi
-
-        echo "[GNOME] Installing ${label} extension via gnome-extensions..." >&2
-        if ! gnome-extensions install --force "$tmpfile"; then
-            echo "[GNOME] ERROR: gnome-extensions install failed for ${label}." >&2
-            rm -f "$tmpfile"
-            return 1
-        fi
-        rm -f "$tmpfile"
-    fi
-
-    # Disable the extension immediately after install (to avoid any interference during setup)
-    if gnome-extensions info "$uuid" >/dev/null 2>&1; then
-        gnome-extensions disable "$uuid" >/dev/null 2>&1 || true
-        echo "[GNOME] ${label} installed as ${uuid} and currently DISABLED (will enable at end)." >&2
-    fi
-
-    # Return the UUID (so we can capture it in a variable)
-    printf '%s\n' "$uuid"
-}
-
-configure_gnome_extensions_layout() {
-    echo "[GNOME] === Configuring GNOME Shell extensions (ArcMenu, Taskbar, Blur my Shell) ==="
-    if ! ensure_gnome_extension_tools; then
-        echo "[GNOME] Skipping GNOME extension installation due to missing tools." >&2
-        return
-    fi
-
-    # Install extensions and capture their UUIDs (or blank if failed)
-    ARCMENU_UUID="$(install_gnome_extension_by_id 3628 "ArcMenu" || true)"
-    TASKBAR_UUID="$(install_gnome_extension_by_id 4944 "App Icons Taskbar" || true)"
-    BLUR_SHELL_UUID="$(install_gnome_extension_by_id 3193 "Blur my Shell" || true)"
-
-    # Apply pre-configured settings for each extension via dconf
-    if command -v dconf >/dev/null 2>&1; then
-        # ArcMenu configuration
-        local arcmenu_tmp; arcmenu_tmp="$(mktemp)"
-        if curl -fsSL "$RAW_BASE/configs/arcmenu.conf" -o "$arcmenu_tmp"; then
-            dconf load /org/gnome/shell/extensions/arcmenu/ < "$arcmenu_tmp" 2>/dev/null || \
-                echo "[GNOME] WARNING: Failed to load ArcMenu settings." >&2
-        else
-            echo "[GNOME] NOTE: Could not fetch arcmenu.conf; skipping ArcMenu config." >&2
-        fi
-        rm -f "$arcmenu_tmp"
-
-        # App Icons Taskbar configuration
-        local taskbar_tmp; taskbar_tmp="$(mktemp)"
-        if curl -fsSL "$RAW_BASE/configs/app-icons-taskbar.conf" -o "$taskbar_tmp"; then
-            dconf load /org/gnome/shell/extensions/aztaskbar/ < "$taskbar_tmp" 2>/dev/null || \
-                echo "[GNOME] WARNING: Failed to load App Icons Taskbar settings." >&2
-        else
-            echo "[GNOME] NOTE: Could not fetch app-icons-taskbar.conf; skipping Taskbar config." >&2
-        fi
-        rm -f "$taskbar_tmp"
-
-        # Blur My Shell configuration
-        local blur_tmp; blur_tmp="$(mktemp)"
-        if curl -fsSL "$RAW_BASE/configs/blur-my-shell.conf" -o "$blur_tmp"; then
-            dconf load /org/gnome/shell/extensions/blur-my-shell/ < "$blur_tmp" 2>/dev/null || \
-                echo "[GNOME] WARNING: Failed to load Blur My Shell settings." >&2
-        else
-            echo "[GNOME] NOTE: Could not fetch blur-my-shell.conf; skipping Blur My Shell config." >&2
-        fi
-        rm -f "$blur_tmp"
-    else
-        echo "[GNOME] 'dconf' not found; cannot apply GNOME extension configs." >&2
-    fi
-
-    # Place custom icon for ArcMenu's menu button (non-fatal if fails)
-    local icon_target="$HOME/.local/share/icons/hicolor/48x48/apps/BenjiOS-Menu.png"
-    mkdir -p "$(dirname "$icon_target")"
-    if curl -fsSL "$RAW_BASE/assets/Taskbar.png" -o "$icon_target"; then
-        if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-            gtk-update-icon-cache "$HOME/.local/share/icons/hicolor" >/dev/null 2>&1 || true
-        fi
-    else
-        echo "[GNOME] NOTE: Could not fetch Taskbar.png; ArcMenu will use default icon." >&2
-    fi
-
-    echo "[GNOME] ArcMenu, App Icons Taskbar, and Blur My Shell extensions are installed (disabled for now; will be enabled at the end)."
-}
-
-configure_gnome_extensions_layout
 
 # Apply GNOME Terminal (Ptyxis) configuration
 if command -v dconf >/dev/null 2>&1; then
@@ -1243,114 +1299,6 @@ rm -f "$POST_DOC_TMP"
 #--------------------------------------
 # Enable GNOME layout extensions at the very end
 #--------------------------------------
-enable_gnome_layout_extensions() {
-    local enable_uuids=()
-    local disable_uuids=()
-
-    # Prepare list of extensions to enable (always include GSConnect)
-    [ -n "$ARCMENU_UUID" ]    && enable_uuids+=("$ARCMENU_UUID")
-    [ -n "$TASKBAR_UUID" ]    && enable_uuids+=("$TASKBAR_UUID")
-    [ -n "$BLUR_SHELL_UUID" ] && enable_uuids+=("$BLUR_SHELL_UUID")
-    enable_uuids+=("$GSCONNECT_UUID")
-
-    # If ArcMenu + Taskbar are installed, disable Ubuntu Dock (to avoid duplicate launchers)
-    if [ -n "$ARCMENU_UUID" ] && [ -n "$TASKBAR_UUID" ]; then
-        disable_uuids+=("$UBUNTU_DOCK_UUID")
-    else
-        echo "[GNOME] WARNING: ArcMenu and/or Taskbar extension missing; Ubuntu Dock will remain enabled." >&2
-    fi
-
-    if [ "${#enable_uuids[@]}" -eq 0 ] && [ "${#disable_uuids[@]}" -eq 0 ]; then
-        return 0  # nothing to do
-    fi
-
-    # Use gsettings to persist extension enable/disable states
-    if command -v gsettings >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
-        # Merge enable list with currently enabled extensions
-        local current_enabled merged_enabled
-        current_enabled="$(gsettings get org.gnome.shell enabled-extensions 2>/dev/null || echo "[]")"
-        current_enabled="${current_enabled#@as }"  # remove any GVariant type prefix
-        merged_enabled="$(python3 - "$current_enabled" "${enable_uuids[@]}" << 'PYCODE'
-import ast, sys
-current = sys.argv[1]
-uuids = sys.argv[2:]
-try:
-    arr = ast.literal_eval(current)
-    if not isinstance(arr, list):
-        arr = []
-except Exception:
-    arr = []
-for u in uuids:
-    if u and u not in arr:
-        arr.append(u)
-print(str(arr))
-PYCODE
-)" || merged_enabled=""
-
-        if [ -n "$merged_enabled" ]; then
-            gsettings set org.gnome.shell enabled-extensions "$merged_enabled" 2>/dev/null || true
-        fi
-
-        # Update disabled-extensions list: first remove any that we are enabling (to avoid conflicts)
-        local current_disabled cleaned_disabled final_disabled
-        current_disabled="$(gsettings get org.gnome.shell disabled-extensions 2>/dev/null || echo "[]")"
-        current_disabled="${current_disabled#@as }"
-        cleaned_disabled="$(python3 - "$current_disabled" "${enable_uuids[@]}" << 'PYCODE'
-import ast, sys
-current = sys.argv[1]
-enabled = set(sys.argv[2:])
-try:
-    arr = ast.literal_eval(current)
-    if not isinstance(arr, list):
-        arr = []
-except Exception:
-    arr = []
-arr = [x for x in arr if x not in enabled]
-print(str(arr))
-PYCODE
-)" || cleaned_disabled=""
-
-        # Then add any extensions we want to disable (Ubuntu Dock) to the disabled list
-        final_disabled="$(python3 - "$cleaned_disabled" "${disable_uuids[@]}" << 'PYCODE'
-import ast, sys
-current = sys.argv[1]
-to_disable = sys.argv[2:]
-try:
-    arr = ast.literal_eval(current)
-    if not isinstance(arr, list):
-        arr = []
-except Exception:
-    arr = []
-for u in to_disable:
-    if u and u not in arr:
-        arr.append(u)
-print(str(arr))
-PYCODE
-)" || final_disabled=""
-
-        if [ -n "$final_disabled" ]; then
-            gsettings set org.gnome.shell disabled-extensions "$final_disabled" 2>/dev/null || true
-        fi
-    fi
-
-    # Enable/disable via gnome-extensions (applies changes immediately in this session)
-    if command -v gnome-extensions >/dev/null 2>&1; then
-        for uuid in "${enable_uuids[@]}"; do
-            [ -n "$uuid" ] && gnome-extensions enable "$uuid" >/dev/null 2>&1 || true
-        done
-        for uuid in "${disable_uuids[@]}"; do
-            [ -n "$uuid" ] && gnome-extensions disable "$uuid" >/dev/null 2>&1 || true
-        done
-    fi
-
-    # Log the result
-    if [ "${#disable_uuids[@]}" -gt 0 ]; then
-        echo "[GNOME] Ensured extensions (ArcMenu, Taskbar, Blur My Shell, GSConnect) are ENABLED, and Ubuntu Dock is DISABLED."
-    else
-        echo "[GNOME] Ensured extensions (ArcMenu, Taskbar, Blur My Shell, GSConnect) are ENABLED. (Ubuntu Dock left enabled)"
-    fi
-}
-
 enable_gnome_layout_extensions
 
 #--------------------------------------
@@ -1369,7 +1317,6 @@ if $INSTALL_REFIND; then
 else
     FINAL_MSG+="\n\nrEFInd was not installed."
 fi
-# >>> New: add notes about Secure Boot <<<
 if $INSTALL_REFIND && $SB_ENABLED; then
     if $REFIND_ENROLL_KEY; then
         FINAL_MSG+="\n(Please complete the Secure Boot key enrollment for rEFInd on next reboot.)"
