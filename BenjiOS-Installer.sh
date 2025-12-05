@@ -602,7 +602,7 @@ if [ "$STACK_SELECTION" = "Advanced" ]; then
             update_system)
                 info_popup "Updating system packages and Flatpak apps..."
                 run_sudo_apt apt update
-                run_sudo_apt apt upgrade -y
+                run_sudo_apt apt -o APT::Get::Always-Include-Phased-Updates=true upgrade -y
                 run_sudo_apt apt autoremove -y || true
                 run_sudo_apt apt clean || true
                 if command -v flatpak >/dev/null 2>&1; then
