@@ -497,7 +497,6 @@ PYCODE
         echo "[GNOME] Ensured extensions (ArcMenu, Taskbar, Blur My Shell, GSConnect) are ENABLED. (Ubuntu Dock left enabled)"
     fi
 }
-
 #--------------------------------------
 # Stack selection (Zenity checklist)
 #--------------------------------------
@@ -602,7 +601,7 @@ if [ "$STACK_SELECTION" = "Advanced" ]; then
             update_system)
                 info_popup "Updating system packages and Flatpak apps..."
                 run_sudo_apt apt update
-                run_sudo_apt apt -o upgrade -y
+                run_sudo_apt apt -o APT::Get::Always-Include-Phased-Updates=true upgrade -y
                 run_sudo_apt apt autoremove -y || true
                 run_sudo_apt apt clean || true
                 if command -v flatpak >/dev/null 2>&1; then
@@ -773,6 +772,15 @@ fi
 # Step 1 – System update/upgrade + multiarch
 #--------------------------------------
 info_popup "Step 1: Updating system and enabling 32-bit support.\n\nYou can watch progress in the terminal."
+
+# Wait if another package manager is running
+if sudo fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/cache/apt/archives/lock >/dev/null 2>&1; then
+    echo "[APT] Another package process is running. Waiting for it to finish..."
+    while sudo fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/cache/apt/archives/lock >/dev/null 2>&1; do
+        sleep 5
+    done
+    echo "[APT] Lock released, proceeding."
+fi
 
 # Update package lists and upgrade installed packages to latest
 run_sudo_apt apt update
@@ -1135,7 +1143,6 @@ if has_stack "tweaks"; then
         echo "[TWEAKS] WARNING: Could not fetch zramswap config; keeping default settings." >&2
     fi
     rm -f "$tmp_zram"
-
     # Enable zram swap service (name varies by Ubuntu version)
     run_sudo systemctl enable --now zramswap.service >/dev/null 2>&1 || \
     run_sudo systemctl enable --now zramswap >/dev/null 2>&1 || true
