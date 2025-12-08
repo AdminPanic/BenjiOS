@@ -569,8 +569,8 @@ if [ "$STACK_SELECTION" = "Advanced" ]; then
                         if [ ! -f "$refind_conf" ]; then
                             run_sudo curl -fsSL "$RAW_BASE/configs/refind/refind-dual.conf" -o "$refind_conf" || true
                         fi
-                        SB_STATE="$(od -An -t u1 -j 4 -N 1 /sys/firmware/efi/efivars/SecureBoot-* 2>/dev/null | awk '{print $1}')"
-                        if [ "$SB_STATE" = "1" ]; then
+                        SB_ENABLED="$(od -An -t u1 -j 4 -N 1 /sys/firmware/efi/efivars/SecureBoot-* 2>/dev/null | awk '{print $1}')"
+                        if [ "$SB_ENABLED" = "1" ]; then
                             cert="$esp/EFI/refind/keys/refind_local.cer"
                             if [ -f "$cert" ]; then
                                 MOK_PASS="$(zenity --password --title='BenjiOS – rEFInd Secure Boot' --text='Enter a password to enroll rEFInd key (you will need to confirm it on reboot):')"
