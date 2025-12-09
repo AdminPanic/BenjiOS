@@ -214,47 +214,71 @@ detect_secure_boot() {
 #--------------------------------------
 # Helper: GNOME appearance + power profile
 #--------------------------------------
+
 configure_gnome_theme_and_power() {
     if ! command -v gsettings >/dev/null 2>&1; then
         echo "[THEME] 'gsettings' not found – skipping desktop theming." >&2
         return
     fi
 
-    local IF_SCHEMA="org.gnome.desktop.interface"
-    echo "[THEME] Applying BenjiOS GNOME look (dark theme + olive accent)…"
+    echo "[THEME] Applying BenjiOS GNOME look (dark theme + olive-ish accent)…"
 
-    # Dark mode
+    # -------------------------
+    # 1. Dark style everywhere
+    # -------------------------
     gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' || true
-    if gsettings writable org.gnome.shell.ubuntu color-scheme; then
-        gsettings set org.gnome.shell.ubuntu color-scheme 'dark' || true
+
+    if gsettings writable org.gnome.shell.ubuntu color-scheme >/dev/null 2>&1; then
+        # Valid values are: default, prefer-dark, prefer-light
+        gsettings set org.gnome.shell.ubuntu color-scheme 'prefer-dark' || true
     fi
 
-    # GTK theme, icons, WM theme, sound theme
-    gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-olive-dark' || true
+    # -------------------------
+    # 2. Yaru Olive GTK / icons
+    # -------------------------
+    gsettings set org.gnome.desktop.interface gtk-theme  'Yaru-olive-dark' || true
     gsettings set org.gnome.desktop.interface icon-theme 'Yaru-olive-dark' || true
     gsettings set org.gnome.desktop.wm.preferences theme 'Yaru-olive-dark' || true
     gsettings set org.gnome.desktop.sound theme-name 'Yaru' || true
 
-    # Accent color (if supported)
+    # -------------------------
+    # 3. Accent color (GNOME 47+)
+    # -------------------------
     if gsettings range org.gnome.desktop.interface accent-color >/dev/null 2>&1; then
-        gsettings set org.gnome.desktop.interface accent-color 'olive' || true
-        # Apply through Yaru Colors switcher if available
-        if [ -x /usr/libexec/yaru-colors-switcher ]; then
-            /usr/libexec/yaru-colors-switcher --color olive --theme dark || true
-        elif [ -x /usr/lib/yaru-colors-switcher ]; then
-            /usr/lib/yaru-colors-switcher --color olive --theme dark || true
+        # Figure out what the system actually allows.
+        local range allowed accent
+        range="$(gsettings range org.gnome.desktop.interface accent-color 2>/dev/null || true)"
+
+        # Try to pick something that matches 'olive' vibe, but *only* if it exists.
+        if printf '%s\n' "$range" | grep -qw "'brown'"; then
+            accent='brown'        # warty brown on Ubuntu 24.10+ in some builds
+        elif printf '%s\n' "$range" | grep -qw "'green'"; then
+            accent='green'        # closest to old Yaru-olive
+        else
+            # Fallback to whatever the first listed color is
+            accent="$(printf '%s\n' "$range" | sed -n "s/.*'\\([^']\\+\\)'.*/\\1/p" | head -n1)"
+        fi
+
+        if [ -n "$accent" ]; then
+            echo "[THEME] Setting accent-color to '$accent' (no native 'olive' in GNOME palette)."
+            gsettings set org.gnome.desktop.interface accent-color "$accent" || true
         fi
     else
-        # Fallback for older Ubuntu (no accent-color key)
+        # Older Ubuntu: fall back to pure Yaru-olive theme selection
         gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-olive-dark' || \
         gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-olive' || true
     fi
 
-    # Rebuild icon caches (best effort, no harm if fails)
-    [ -d "$HOME/.icons" ] && gtk-update-icon-cache "$HOME/.icons" >/dev/null 2>&1 || true
-    [ -d /usr/share/icons/Yaru ] && run_sudo gtk-update-icon-cache /usr/share/icons/Yaru >/dev/null 2>&1 || true
+    # Optional: best-effort Yaru Colors helper, if you still ship it
+    if [ -x /usr/libexec/yaru-colors-switcher ]; then
+        /usr/libexec/yaru-colors-switcher --color olive --theme dark || true
+    elif [ -x /usr/lib/yaru-colors-switcher ]; then
+        /usr/lib/yaru-colors-switcher --color olive --theme dark || true
+    fi
 
-    # Set power profile to Performance if available
+    # -------------------------
+    # 4. Power profile
+    # -------------------------
     if command -v powerprofilesctl >/dev/null 2>&1; then
         if powerprofilesctl list 2>/dev/null | grep -q "performance"; then
             powerprofilesctl set performance >/dev/null 2>&1 || true
