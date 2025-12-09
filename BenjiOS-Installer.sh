@@ -534,6 +534,7 @@ STACK_SELECTION="$(zenity --list \
     TRUE  "management"    "Remote management: SSH server, xRDP, firewall, WoL" \
     TRUE  "tweaks"        "Performance tweaks: zram compressed swap + earlyoom" \
     TRUE  "auto_updates"  "Automatic APT updates (unattended-upgrades)" \
+    TRUE  "security"      "Security: ClamAV + GUI, UFW + GUFW, Malware scanner" \
     FALSE "refind"        "rEFInd boot manager with BsxM1 theme (advanced multi-boot)" \
     --extra-button="Advanced" \
 )" || true
@@ -949,6 +950,21 @@ if has_stack "management"; then
         ethtool
 fi
 
+# Security stack: Antivirus, firewall GUI, malware scanner prerequisites
+if has_stack "security"; then
+    add_apt \
+        clamav \
+        clamav-daemon \
+        clamav-freshclam \
+        clamtk \
+        ufw \
+        gufw \
+        wget \
+        tar
+    # NOTE: Linux Malware Detect (LMD) is installed from upstream, not apt,
+    # so no apt package here; we handle it in a post-install block below.
+fi
+
 # Tweaks stack (zram + earlyoom)
 if has_stack "tweaks"; then
     add_apt \
@@ -1187,6 +1203,100 @@ if $IS_HYPERV; then
     for svc in hv-kvp-daemon.service hv-vss-daemon.service hv-fcopy-daemon.service; do
         run_sudo systemctl enable --now "$svc" >/dev/null 2>&1 || true
     done
+fi
+
+# --- Security stack post-install: ClamAV (daemon + GUI) ---
+
+if has_stack "security"; then
+    echo "[SECURITY] Configuring ClamAV antivirus…"
+
+    # Ensure freshclam and clamd services are enabled and running (if they exist)
+    if systemctl list-unit-files | grep -q '^clamav-freshclam\.service'; then
+        run_sudo systemctl enable --now clamav-freshclam.service >/dev/null 2>&1 || true
+    fi
+    if systemctl list-unit-files | grep -q '^clamav-daemon\.service'; then
+        run_sudo systemctl enable --now clamav-daemon.service >/dev/null 2>&1 || true
+    fi
+
+    # First definition update (non-fatal if it fails due to network etc.)
+    if command -v freshclam >/dev/null 2>&1; then
+        run_sudo freshclam >/dev/null 2>&1 || true
+    fi
+
+    # ClamTK is installed via apt above; nothing special to configure here.
+    # It provides an on-demand GUI that the user can use without the terminal.
+fi
+
+# --- Security stack post-install: UFW firewall + GUFW GUI ---
+if has_stack "security"; then
+    if command -v ufw >/dev/null 2>&1; then
+        # Only set defaults if UFW is currently inactive (so we don't override
+        # rules set by the management stack on reruns).
+        if ! run_sudo ufw status | grep -q "Status: active"; then
+            echo "[SECURITY] Enabling UFW with default desktop rules (deny incoming, allow outgoing)…"
+            run_sudo ufw --force reset >/dev/null 2>&1 || true
+            run_sudo ufw default deny incoming >/dev/null 2>&1 || true
+            run_sudo ufw default allow outgoing >/dev/null 2>&1 || true
+            run_sudo ufw --force enable >/dev/null 2>&1 || true
+        else
+            echo "[SECURITY] UFW already active; leaving existing rules in place."
+        fi
+    fi
+fi
+
+# --- Security stack post-install: Linux Malware Detect (LMD) ---
+if has_stack "security"; then
+    echo "[SECURITY] Installing and configuring Linux Malware Detect (LMD)…"
+
+    if ! command -v maldet >/dev/null 2>&1; then
+        tmpdir="$(mktemp -d)"
+        (
+            set -e
+            cd "$tmpdir"
+            # Download latest LMD
+            wget -q https://www.rfxn.com/downloads/maldetect-current.tar.gz
+            tar -xzf maldetect-current.tar.gz
+            cd maldetect-* || exit 1
+            # Non-interactive install
+            run_sudo ./install.sh >/dev/null 2>&1 || true
+        ) || echo "[SECURITY] WARNING: LMD install encountered an error."
+        rm -rf "$tmpdir"
+    else
+        echo "[SECURITY] LMD already installed, skipping install."
+    fi
+
+    # Basic LMD configuration
+    if [ -f /usr/local/maldetect/conf.maldet ]; then
+        # Disable email alerts by default (user can enable manually later)
+        run_sudo sed -i 's/^email_alert=.*/email_alert="0"/' /usr/local/maldetect/conf.maldet || true
+
+        # If ClamAV is present, let LMD use it as an engine to improve detection
+        if command -v clamscan >/dev/null 2>&1; then
+            run_sudo sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' /usr/local/maldetect/conf.maldet || true
+        fi
+    fi
+
+    # Update LMD signatures (non-fatal if offline)
+    if command -v maldet >/dev/null 2>&1; then
+        run_sudo maldet --update >/dev/null 2>&1 || true
+        run_sudo maldet --update-ver >/dev/null 2>&1 || true
+    fi
+
+    # Daily cron job (idempotent)
+    if [ ! -f /etc/cron.daily/maldet ]; then
+        echo "[SECURITY] Creating daily LMD cron job…"
+        run_sudo bash -c 'cat > /etc/cron.daily/maldet << "EOF"
+#!/bin/sh
+# Daily Linux Malware Detect scan - quiet
+if command -v maldet >/dev/null 2>&1; then
+    # Scan common locations quietly and in background
+    /usr/local/sbin/maldet -b -r /home 1>/dev/null 2>&1
+fi
+EOF
+chmod +x /etc/cron.daily/maldet'
+    else
+        echo "[SECURITY] LMD cron job already exists; leaving as-is."
+    fi
 fi
 
 #--------------------------------------
