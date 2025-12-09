@@ -250,9 +250,7 @@ configure_gnome_theme_and_power() {
         range="$(gsettings range org.gnome.desktop.interface accent-color 2>/dev/null || true)"
 
         # Try to pick something that matches 'olive' vibe, but *only* if it exists.
-        if printf '%s\n' "$range" | grep -qw "'brown'"; then
-            accent='brown'        # warty brown on Ubuntu 24.10+ in some builds
-        elif printf '%s\n' "$range" | grep -qw "'green'"; then
+        if printf '%s\n' "$range" | grep -qw "'green'"; then
             accent='green'        # closest to old Yaru-olive
         else
             # Fallback to whatever the first listed color is
