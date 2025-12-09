@@ -47,6 +47,10 @@ IS_VMWARE=false
 IS_VBOX=false       # VirtualBox
 IS_HYPERV=false     # Hyper-V
 
+# Secure Boot flags (keep global so set -u never trips)
+SB_ENABLED=false        # boolean: true if Secure Boot is enabled
+SB_STATE="disabled"     # human-readable state
+
 #--------------------------------------
 # Small helper: non-blocking info popup
 #--------------------------------------
@@ -188,6 +192,23 @@ find_esp() {
         fi
     done
     return 1
+}
+
+#--------------------------------------
+# Helper: detect Secure Boot state
+#   Sets SB_ENABLED (true/false) and SB_STATE ("enabled"/"disabled")
+#--------------------------------------
+detect_secure_boot() {
+    local sb_raw
+    SB_ENABLED=false
+    SB_STATE="disabled"
+
+    if sb_raw="$(od -An -t u1 -j 4 -N 1 /sys/firmware/efi/efivars/SecureBoot-* 2>/dev/null | awk 'NR==1{print $1}')" 2>/dev/null; then
+        if [ "$sb_raw" = "1" ]; then
+            SB_ENABLED=true
+            SB_STATE="enabled"
+        fi
+    fi
 }
 
 #--------------------------------------
@@ -569,8 +590,8 @@ if [ "$STACK_SELECTION" = "Advanced" ]; then
                         if [ ! -f "$refind_conf" ]; then
                             run_sudo curl -fsSL "$RAW_BASE/configs/refind/refind-dual.conf" -o "$refind_conf" || true
                         fi
-                        SB_ENABLED="$(od -An -t u1 -j 4 -N 1 /sys/firmware/efi/efivars/SecureBoot-* 2>/dev/null | awk '{print $1}')"
-                        if [ "$SB_ENABLED" = "1" ]; then
+                        detect_secure_boot
+                        if $SB_ENABLED; then
                             cert="$esp/EFI/refind/keys/refind_local.cer"
                             if [ -f "$cert" ]; then
                                 MOK_PASS="$(zenity --password --title='BenjiOS – rEFInd Secure Boot' --text='Enter a password to enroll rEFInd key (you will need to confirm it on reboot):')"
@@ -688,6 +709,7 @@ REFIND_ENROLL_KEY=false    # initialize flag for secure boot key enrollment
 if has_stack "refind"; then
     # Only install rEFInd if running on a UEFI system
     if [ -d /sys/firmware/efi ]; then
+        detect_secure_boot
         INSTALL_REFIND=true
         # Ask rEFInd boot mode
         REFIND_BOOT_MODE="$(zenity --list \
