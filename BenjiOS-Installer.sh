@@ -52,6 +52,70 @@ SB_ENABLED=false        # boolean: true if Secure Boot is enabled
 SB_STATE="disabled"     # human-readable state
 
 #--------------------------------------
+# Hardware detection helpers (GPU + virtualization)
+#--------------------------------------
+detect_gpus() {
+    # Reset flags (in case this function is ever re-used)
+    AMD_GPU_DETECTED=false
+    NVIDIA_GPU_DETECTED=false
+    INTEL_GPU_DETECTED=false
+
+    if ! command -v lspci >/dev/null 2>&1; then
+        echo "[DETECT] 'lspci' not found; skipping GPU detection."
+        return
+    fi
+
+    local gpus
+    gpus="$(lspci -nn | grep -Ei 'VGA|3D|Display' || true)"
+
+    if printf '%s\n' "$gpus" | grep -qi 'nvidia'; then
+        NVIDIA_GPU_DETECTED=true
+    fi
+    if printf '%s\n' "$gpus" | grep -qi 'amd\|ati\|advanced micro devices'; then
+        AMD_GPU_DETECTED=true
+    fi
+    if printf '%s\n' "$gpus" | grep -qi 'intel'; then
+        INTEL_GPU_DETECTED=true
+    fi
+}
+
+detect_virtualization() {
+    # Reset flags
+    VIRT_TYPE="none"
+    IS_VIRT=false
+    IS_KVM=false
+    IS_VMWARE=false
+    IS_VBOX=false
+    IS_HYPERV=false
+
+    if ! command -v systemd-detect-virt >/dev/null 2>&1; then
+        echo "[DETECT] 'systemd-detect-virt' not found; skipping virtualization detection."
+        return
+    fi
+
+    VIRT_TYPE="$(systemd-detect-virt 2>/dev/null || echo none)"
+    if [ "$VIRT_TYPE" = "none" ]; then
+        return
+    fi
+
+    IS_VIRT=true
+    case "$VIRT_TYPE" in
+        kvm|qemu)
+            IS_KVM=true
+            ;;
+        vmware)
+            IS_VMWARE=true
+            ;;
+        oracle|vbox|vboxguest)
+            IS_VBOX=true
+            ;;
+        microsoft)
+            IS_HYPERV=true
+            ;;
+    esac
+}
+
+#--------------------------------------
 # Small helper: non-blocking info popup
 #--------------------------------------
 info_popup() {
@@ -92,6 +156,13 @@ mkdir -p "$DESKTOP_DIR"
 
 # Set non-interactive for all apt/apt-get usage in this script
 export DEBIAN_FRONTEND=noninteractive
+
+# First-run marker: used to avoid re-applying some defaults on subsequent runs
+BENJIOS_MARKER="/etc/benjios-installed"
+FIRST_RUN=true
+if [ -f "$BENJIOS_MARKER" ]; then
+    FIRST_RUN=false
+fi
 
 # Trap any unexpected errors to notify user and exit gracefully
 trap 'zenity --error --title="BenjiOS Installer" --width="$ZENITY_W" --height=150 --text="Installation encountered an error and cannot continue."; sudo -k; exit 1' ERR
@@ -540,13 +611,24 @@ PYCODE
         echo "[GNOME] Ensured extensions (ArcMenu, Taskbar, Blur My Shell, GSConnect) are ENABLED. (Ubuntu Dock left enabled)"
     fi
 }
+
+#--------------------------------------
+# Hardware / virtualization detection
+#--------------------------------------
+detect_gpus
+detect_virtualization
+
+echo "[DETECT] GPU: AMD=${AMD_GPU_DETECTED} NVIDIA=${NVIDIA_GPU_DETECTED} INTEL=${INTEL_GPU_DETECTED}"
+echo "[DETECT] Virtualization: type=${VIRT_TYPE} KVM=${IS_KVM} VMware=${IS_VMWARE} VBox=${IS_VBOX} HyperV=${IS_HYPERV}"
+
 #--------------------------------------
 # Stack selection (Zenity checklist)
 #--------------------------------------
-STACK_SELECTION="$(zenity --list \
+STACK_SELECTION=""
+if STACK_SELECTION="$(zenity --list \
     --title="BenjiOS Installer – Component Selection" \
     --width="$ZENITY_W" --height="$ZENITY_H" \
-    --text="Select which stacks to install.\n\nCore system tools, GPU tweaks, and VM guest integrations (based on detected hardware) are ALWAYS installed.\nYou can re-run this script later to add more stacks." \
+    --text="Select which stacks to install.\n\nCore system tools are ALWAYS installed.\nGPU tweaks and VM guest integrations will be installed when compatible hardware is detected.\nYou can re-run this script later to add more stacks." \
     --checklist --separator=" " \
     --column="Install" --column="ID" --column="Description" \
     TRUE  "office"        "Office, mail, basic media, RDP client" \
@@ -556,10 +638,20 @@ STACK_SELECTION="$(zenity --list \
     TRUE  "management"    "Remote management: SSH server, xRDP, firewall, WoL" \
     TRUE  "tweaks"        "Performance tweaks: zram compressed swap + earlyoom" \
     TRUE  "auto_updates"  "Automatic APT updates (unattended-upgrades)" \
-    TRUE  "security"      "Security: ClamAV + GUI, UFW + GUFW, Malware scanner" \
+    TRUE  "security"      "Security: ClamAV + GUI, UFW + GUFW" \
     FALSE "refind"        "rEFInd boot manager with BsxM1 theme (advanced multi-boot)" \
     --extra-button="Advanced" \
-)" || true
+)"; then
+    :
+else
+    # User hit Cancel/closed the dialog
+    zenity --info --title="BenjiOS Installer" \
+           --width="$ZENITY_W" --height=150 \
+           --text="Installation cancelled."
+    sudo -k
+    exit 0
+fi
+
 
 # >>> New: Advanced options handling <<<
 if [ "$STACK_SELECTION" = "Advanced" ]; then
@@ -972,7 +1064,7 @@ if has_stack "management"; then
         ethtool
 fi
 
-# Security stack: Antivirus, firewall GUI, malware scanner prerequisites
+# Security stack: Antivirus, firewall GUI
 if has_stack "security"; then
     add_apt \
         clamav \
@@ -983,8 +1075,6 @@ if has_stack "security"; then
         gufw \
         wget \
         tar
-    # NOTE: Linux Malware Detect (LMD) is installed from upstream, not apt,
-    # so no apt package here; we handle it in a post-install block below.
 fi
 
 # Tweaks stack (zram + earlyoom)
@@ -1100,8 +1190,12 @@ if [ "${#FLATPAK_PKGS[@]}" -gt 0 ]; then
     flatpak install -y flathub "${FLATPAK_PKGS[@]}" || true
 fi
 
-configure_gnome_theme_and_power
-configure_gnome_extensions_layout
+if $FIRST_RUN; then
+    configure_gnome_theme_and_power
+    configure_gnome_extensions_layout
+else
+    echo "[THEME] Skipping automatic theme/layout apply (not first run). Use Advanced → Theme to reapply BenjiOS layout."
+fi
 
 #--------------------------------------
 # Helper: configure auto updates (unattended-upgrades)
@@ -1266,61 +1360,6 @@ if has_stack "security"; then
     fi
 fi
 
-# --- Security stack post-install: Linux Malware Detect (LMD) ---
-if has_stack "security"; then
-    echo "[SECURITY] Installing and configuring Linux Malware Detect (LMD)…"
-
-    if ! command -v maldet >/dev/null 2>&1; then
-        tmpdir="$(mktemp -d)"
-        (
-            set -e
-            cd "$tmpdir"
-            # Download latest LMD
-            wget -q https://www.rfxn.com/downloads/maldetect-current.tar.gz
-            tar -xzf maldetect-current.tar.gz
-            cd maldetect-* || exit 1
-            # Non-interactive install
-            run_sudo ./install.sh >/dev/null 2>&1 || true
-        ) || echo "[SECURITY] WARNING: LMD install encountered an error."
-        rm -rf "$tmpdir"
-    else
-        echo "[SECURITY] LMD already installed, skipping install."
-    fi
-
-    # Basic LMD configuration
-    if [ -f /usr/local/maldetect/conf.maldet ]; then
-        # Disable email alerts by default (user can enable manually later)
-        run_sudo sed -i 's/^email_alert=.*/email_alert="0"/' /usr/local/maldetect/conf.maldet || true
-
-        # If ClamAV is present, let LMD use it as an engine to improve detection
-        if command -v clamscan >/dev/null 2>&1; then
-            run_sudo sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' /usr/local/maldetect/conf.maldet || true
-        fi
-    fi
-
-    # Update LMD signatures (non-fatal if offline)
-    if command -v maldet >/dev/null 2>&1; then
-        run_sudo maldet --update >/dev/null 2>&1 || true
-        run_sudo maldet --update-ver >/dev/null 2>&1 || true
-    fi
-
-    # Daily cron job (idempotent)
-    if [ ! -f /etc/cron.daily/maldet ]; then
-        echo "[SECURITY] Creating daily LMD cron job…"
-        run_sudo bash -c 'cat > /etc/cron.daily/maldet << "EOF"
-#!/bin/sh
-# Daily Linux Malware Detect scan - quiet
-if command -v maldet >/dev/null 2>&1; then
-    # Scan common locations quietly and in background
-    /usr/local/sbin/maldet -b -r /home 1>/dev/null 2>&1
-fi
-EOF
-chmod +x /etc/cron.daily/maldet'
-    else
-        echo "[SECURITY] LMD cron job already exists; leaving as-is."
-    fi
-fi
-
 #--------------------------------------
 # rEFInd installation + theme config
 #--------------------------------------
@@ -1334,12 +1373,22 @@ install_and_configure_refind() {
         return
     fi
 
-    # Run rEFInd's own installer (writes to ESP), skipping if already installed with Secure Boot key
-    if $SB_ENABLED && [ -f "$esp/EFI/refind/keys/refind_local.cer" ]; then
-        echo "[rEFInd] Already installed with Secure Boot key; skipping rEFInd installation to preserve keys."
+    local refind_dir="$esp/EFI/refind"
+
+    # Run rEFInd's own installer (writes to ESP), but avoid clobbering existing setups
+    if [ -d "$refind_dir" ]; then
+        echo "[rEFInd] Existing rEFInd directory detected at '$refind_dir'."
+        if $SB_ENABLED && [ -f "$refind_dir/keys/refind_local.cer" ]; then
+            echo "[rEFInd] Secure Boot key directory present; skipping refind-install to preserve keys."
+        else
+            echo "[rEFInd] Skipping refind-install to avoid modifying existing EFI boot entries."
+        fi
     else
         if command -v refind-install >/dev/null 2>&1; then
+            echo "[rEFInd] Running refind-install to set up rEFInd on ESP…"
             run_sudo refind-install || true
+        else
+            echo "[rEFInd] WARNING: refind-install not found; cannot perform initial rEFInd installation." >&2
         fi
     fi
 
@@ -1360,14 +1409,13 @@ install_and_configure_refind() {
     fi
 
     # Prepare theme installation
-    local theme_dir="$esp/EFI/refind/themes/refind-bsxm1-theme"
+    local theme_dir="$refind_dir/themes/refind-bsxm1-theme"
     run_sudo mkdir -p "$(dirname "$theme_dir")"
     if [ ! -d "$theme_dir" ]; then
         run_sudo git clone --depth=1 https://github.com/AlexFullmoon/refind-bsxm1-theme.git "$theme_dir" || true
     fi
 
     # Prepare rEFInd config
-    local refind_dir="$esp/EFI/refind"
     local refind_conf="$refind_dir/refind.conf"
     run_sudo mkdir -p "$refind_dir"
 
@@ -1398,7 +1446,15 @@ install_and_configure_refind() {
 }
 
 if $INSTALL_REFIND; then
-    install_and_configure_refind "$REFIND_BOOT_MODE"
+    if zenity --question \
+         --title="BenjiOS – rEFInd Boot Manager" \
+         --width="$ZENITY_W" --height="$ZENITY_H" \
+         --text="BenjiOS is about to install or update the rEFInd boot manager.\n\nThis modifies your EFI System Partition and boot entries. If something goes wrong, you may need a live USB to repair your bootloader.\n\nProceed with rEFInd installation now?"; then
+        install_and_configure_refind "$REFIND_BOOT_MODE"
+    else
+        echo "[rEFInd] User cancelled rEFInd installation at final confirmation."
+        INSTALL_REFIND=false
+    fi
 fi
 
 # >>> New: Trigger MOK key enrollment if needed <<<
@@ -1461,6 +1517,10 @@ rm -f "$POST_DOC_TMP"
 # Enable GNOME layout extensions at the very end
 #--------------------------------------
 enable_gnome_layout_extensions
+# Mark system as having completed initial BenjiOS installation
+if $FIRST_RUN; then
+    run_sudo touch "$BENJIOS_MARKER"
+fi
 
 #--------------------------------------
 # Done – final message and optional reboot
