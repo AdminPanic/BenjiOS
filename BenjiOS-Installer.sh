@@ -65,18 +65,41 @@ detect_gpus() {
         return
     fi
 
-    local gpus
-    gpus="$(lspci -nn | grep -Ei 'VGA|3D|Display' || true)"
+    # Query only display-class devices by PCI class code:
+    # 0300 = VGA compatible controller
+    # 0302 = 3D controller
+    # 0380 = Display controller (less common; optional)
+    #
+    # Using -n/-nn gives numeric vendor IDs so we avoid false positives from vendor strings.
+    local lines=""
+    lines="$(lspci -Dnns ::0300 ::0302 ::0380 2>/dev/null || true)"
 
-    if printf '%s\n' "$gpus" | grep -qi 'nvidia'; then
-        NVIDIA_GPU_DETECTED=true
+    # Fallback if this pciutils doesn't support ::class syntax
+    if [ -z "$lines" ]; then
+        # Filter by class codes from full numeric output (still numeric IDs)
+        lines="$(lspci -Dnns 2>/dev/null | grep -E '\[03(00|02|80)\]:' || true)"
     fi
-    if printf '%s\n' "$gpus" | grep -qi 'amd\|ati\|advanced micro devices'; then
-        AMD_GPU_DETECTED=true
+
+    if [ -z "$lines" ]; then
+        echo "[DETECT] No PCI display devices found via lspci; skipping GPU detection."
+        return
     fi
-    if printf '%s\n' "$gpus" | grep -qi 'intel'; then
-        INTEL_GPU_DETECTED=true
-    fi
+
+    # Each line looks like:
+    # 0000:00:02.0 [0300]: 8086:XXXX (rev ..) ...
+    # We take the vendor ID (first 4 hex digits before the colon)
+    local vendor
+    while IFS= read -r line; do
+        vendor="$(printf '%s\n' "$line" | sed -n 's/.*: \([0-9a-fA-F]\{4\}\):[0-9a-fA-F]\{4\}.*/\1/p' | tr 'A-F' 'a-f')"
+        case "$vendor" in
+            1002) AMD_GPU_DETECTED=true ;;
+            10de) NVIDIA_GPU_DETECTED=true ;;
+            8086) INTEL_GPU_DETECTED=true ;;
+            # Known virtual GPU vendors — explicitly ignore so they don't trigger AMD/Intel/NVIDIA
+            1af4|1234|15ad|80ee|1414) : ;;
+            "") : ;;
+        esac
+    done <<< "$lines"
 }
 
 detect_virtualization() {
