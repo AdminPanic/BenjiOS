@@ -306,6 +306,143 @@ detect_secure_boot() {
 }
 
 #--------------------------------------
+# Helper: Google Drive Automount
+#--------------------------------------
+install_goa_gdrive_automount() {
+  set -euo pipefail
+
+  # --- sudo keepalive (safe even if already root) ---
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    sudo -v
+    ( while true; do sudo -n true; sleep 60; done ) 2>/dev/null &
+    local _SUDO_KEEPALIVE_PID=$!
+    trap 'kill "${_SUDO_KEEPALIVE_PID:-}" 2>/dev/null || true' EXIT
+  fi
+
+  # Helper to run commands as root whether we're root or not
+  _as_root() {
+    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+      "$@"
+    else
+      sudo "$@"
+    fi
+  }
+
+  # --- install helper script ---
+  _as_root install -d -m 0755 /usr/local/libexec
+  _as_root tee /usr/local/libexec/goa-gdrive-automount >/dev/null <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+log() { echo "[goa-gdrive-automount] $*"; }
+
+# Must run in a graphical user session (needs session DBus + GVfs)
+if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+  exit 0
+fi
+
+if ! command -v gio >/dev/null 2>&1; then
+  log "gio not found; skipping."
+  exit 0
+fi
+
+# Give GNOME/GVfs a moment to come alive after login
+sleep 10
+
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/goa-1.0/accounts.conf"
+if [[ ! -r "$CONF" ]]; then
+  log "No GOA config yet ($CONF). User probably hasn't added an account."
+  exit 0
+fi
+
+# Extract Google accounts with Files enabled.
+mapfile -t EMAILS < <(
+  awk '
+    function flush() {
+      if (provider=="google" && files==1 && email!="") print email;
+      provider=""; files=0; email="";
+    }
+    /^\[/ { flush(); next }
+    $0 ~ /^ProviderType=google$/ { provider="google"; next }
+    $0 ~ /^FilesEnabled=true$/ { files=1; next }
+    $0 ~ /^Files[[:space:]]+enabled=true$/ { files=1; next }
+    $0 ~ /^Files=true$/ { files=1; next }
+    $0 ~ /^(Identity|PresentationIdentity)=/ {
+      split($0,a,"="); email=a[2];
+      gsub(/^'\''|'\''$/,"",email); gsub(/^"|"$/,"",email);
+      next
+    }
+    END { flush() }
+  ' "$CONF" | sort -u
+)
+
+if [[ ${#EMAILS[@]} -eq 0 ]]; then
+  log "No Google accounts with Files enabled found."
+  exit 0
+fi
+
+gio mount -l >/dev/null 2>&1 || true
+
+for email in "${EMAILS[@]}"; do
+  uri="google-drive://${email}/"
+
+  if gio mount -l 2>/dev/null | grep -Fq "$uri"; then
+    log "Already mounted: $email"
+    continue
+  fi
+
+  log "Mounting: $uri"
+  if gio mount "$uri" >/dev/null 2>&1; then
+    log "Mounted: $email"
+    continue
+  fi
+
+  log "gio mount failed for $email; trying gio open."
+  gio open "$uri" >/dev/null 2>&1 || true
+done
+EOF
+  _as_root chmod 0755 /usr/local/libexec/goa-gdrive-automount
+
+  # --- install systemd user units (global) ---
+  _as_root install -d -m 0755 /etc/systemd/user
+
+  _as_root tee /etc/systemd/user/goa-gdrive-automount.service >/dev/null <<'EOF'
+[Unit]
+Description=Auto-mount Google Drive (GNOME Online Accounts)
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/goa-gdrive-automount
+EOF
+
+  _as_root tee /etc/systemd/user/goa-gdrive-automount.timer >/dev/null <<'EOF'
+[Unit]
+Description=Retry Google Drive auto-mount (GNOME Online Accounts)
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=5m
+AccuracySec=30s
+Unit=goa-gdrive-automount.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  # --- enable globally for all users ---
+  _as_root systemctl --global daemon-reload
+  _as_root systemctl --global enable goa-gdrive-automount.timer
+  _as_root systemctl --global enable goa-gdrive-automount.service
+
+  # Optional: start the timer right away for the current user session(s)
+  # (won't hurt if no session is running)
+  _as_root systemctl --global start goa-gdrive-automount.timer 2>/dev/null || true
+
+  echo "[OK] Installed GOA Google Drive auto-mount (global user timer enabled)."
+}
+
+#--------------------------------------
 # Helper: GNOME appearance + power profile
 #--------------------------------------
 
@@ -376,6 +513,12 @@ configure_gnome_theme_and_power() {
             powerprofilesctl set performance >/dev/null 2>&1 || true
         fi
     fi
+
+    # -------------------------
+    # 5. Gnome Settings
+    # -------------------------
+    gsettings set org.gnome.mutter check-alive-timeout 15000
+    install_goa_gdrive_automount
 }
 
 #--------------------------------------
