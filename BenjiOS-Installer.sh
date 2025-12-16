@@ -1167,7 +1167,8 @@ if has_stack "gaming"; then
         libxkbcommon-x11-0:i386 \
         libvulkan1:i386 \
         mesa-vulkan-drivers \
-        mesa-vulkan-drivers:i386
+        mesa-vulkan-drivers:i386 \
+        steam-devices
 
     # Game launchers via Flatpak (latest versions)
     add_flatpak \
