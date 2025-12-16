@@ -309,7 +309,7 @@ detect_secure_boot() {
 # Helper: Google Drive Automount
 #--------------------------------------
 install_goa_gdrive_automount() {
-    # Fast exit on systems without systemd user units or gio
+    # Fast exit on systems without systemd or gio
     if ! command -v systemctl >/dev/null 2>&1; then
         echo "[GOA] systemctl not found – skipping Google Drive auto-mount setup."
         return 0
@@ -321,9 +321,9 @@ install_goa_gdrive_automount() {
     fi
 
     local tmp_script tmp_service tmp_timer
-    tmp_script="$(mktemp)"
-    tmp_service="$(mktemp)"
-    tmp_timer="$(mktemp)"
+    tmp_script="$(mktemp)"  || { echo "[GOA] mktemp failed for script";  return 0; }
+    tmp_service="$(mktemp)" || { echo "[GOA] mktemp failed for service"; rm -f "$tmp_script"; return 0; }
+    tmp_timer="$(mktemp)"   || { echo "[GOA] mktemp failed for timer";   rm -f "$tmp_script" "$tmp_service"; return 0; }
 
     # --- helper script run as user (via systemd --user) ---
     cat >"$tmp_script" <<'EOF'
@@ -355,7 +355,8 @@ gio mount -li 2>/dev/null \
         if gio mount "$uri" 2>/dev/null; then
             log "Mounted $uri"
         else
-            log "Failed to mount $uri"
+            log "Failed to mount $uri, trying gio open"
+            gio open "$uri" >/dev/null 2>&1 || true
         fi
     done
 
@@ -412,15 +413,18 @@ EOF
 
     rm -f "$tmp_script" "$tmp_service" "$tmp_timer"
 
-    # --- enable globally for all users (best-effort, never fatal) ---
-    run_sudo systemctl --global daemon-reload || true
-    run_sudo systemctl --global enable goa-gdrive-automount.service || true
-    run_sudo systemctl --global enable goa-gdrive-automount.timer   || true
+    # --- enable timer globally for all users (only the timer, no service) ---
+    # --global is only valid with enable/disable, so we only use it here.
+    run_sudo systemctl enable --global goa-gdrive-automount.timer >/dev/null 2>&1 || \
+        echo "[GOA] Could not enable timer globally – will still try for current user."
 
-    # Optional: start the timer right away (safe even if no user session exists yet)
-    run_sudo systemctl --global start goa-gdrive-automount.timer 2>/dev/null || true
+    # --- best-effort: enable & start for the current user session too ---
+    if systemctl --user show-environment >/dev/null 2>&1; then
+        systemctl --user daemon-reload >/dev/null 2>&1 || true
+        systemctl --user enable --now goa-gdrive-automount.timer >/dev/null 2>&1 || true
+    fi
 
-    echo "[GOA] Installed GOA Google Drive auto-mount (global user timer enabled)."
+    echo "[GOA] Installed GOA Google Drive auto-mount (timer enabled where supported)."
     return 0
 }
 
