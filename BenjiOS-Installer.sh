@@ -309,28 +309,9 @@ detect_secure_boot() {
 # Helper: Google Drive Automount
 #--------------------------------------
 install_goa_gdrive_automount() {
-  set -euo pipefail
-
-  # --- sudo keepalive (safe even if already root) ---
-  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-    sudo -v
-    ( while true; do sudo -n true; sleep 60; done ) 2>/dev/null &
-    local _SUDO_KEEPALIVE_PID=$!
-    trap 'kill "${_SUDO_KEEPALIVE_PID:-}" 2>/dev/null || true' EXIT
-  fi
-
-  # Helper to run commands as root whether we're root or not
-  _as_root() {
-    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
-      "$@"
-    else
-      sudo "$@"
-    fi
-  }
-
   # --- install helper script ---
-  _as_root install -d -m 0755 /usr/local/libexec
-  _as_root tee /usr/local/libexec/goa-gdrive-automount >/dev/null <<'EOF'
+ sudo install -d -m 0755 /usr/local/libexec
+ sudo tee /usr/local/libexec/goa-gdrive-automount >/dev/null <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 log() { echo "[goa-gdrive-automount] $*"; }
@@ -400,12 +381,12 @@ for email in "${EMAILS[@]}"; do
   gio open "$uri" >/dev/null 2>&1 || true
 done
 EOF
-  _as_root chmod 0755 /usr/local/libexec/goa-gdrive-automount
+  sudo chmod 0755 /usr/local/libexec/goa-gdrive-automount
 
   # --- install systemd user units (global) ---
-  _as_root install -d -m 0755 /etc/systemd/user
+  sudo install -d -m 0755 /etc/systemd/user
 
-  _as_root tee /etc/systemd/user/goa-gdrive-automount.service >/dev/null <<'EOF'
+  sudo tee /etc/systemd/user/goa-gdrive-automount.service >/dev/null <<'EOF'
 [Unit]
 Description=Auto-mount Google Drive (GNOME Online Accounts)
 After=graphical-session.target
@@ -416,7 +397,7 @@ Type=oneshot
 ExecStart=/usr/local/libexec/goa-gdrive-automount
 EOF
 
-  _as_root tee /etc/systemd/user/goa-gdrive-automount.timer >/dev/null <<'EOF'
+  sudo tee /etc/systemd/user/goa-gdrive-automount.timer >/dev/null <<'EOF'
 [Unit]
 Description=Retry Google Drive auto-mount (GNOME Online Accounts)
 
@@ -431,13 +412,13 @@ WantedBy=timers.target
 EOF
 
   # --- enable globally for all users ---
-  _as_root systemctl --global daemon-reload
-  _as_root systemctl --global enable goa-gdrive-automount.timer
-  _as_root systemctl --global enable goa-gdrive-automount.service
+  sudo systemctl --global daemon-reload
+  sudo systemctl --global enable goa-gdrive-automount.timer
+  sudo systemctl --global enable goa-gdrive-automount.service
 
   # Optional: start the timer right away for the current user session(s)
   # (won't hurt if no session is running)
-  _as_root systemctl --global start goa-gdrive-automount.timer 2>/dev/null || true
+  sudo systemctl --global start goa-gdrive-automount.timer 2>/dev/null || true
 
   echo "[OK] Installed GOA Google Drive auto-mount (global user timer enabled)."
 }
