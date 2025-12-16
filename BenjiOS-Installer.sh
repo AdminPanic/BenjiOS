@@ -518,7 +518,7 @@ configure_gnome_theme_and_power() {
     # 5. Gnome Settings
     # -------------------------
     gsettings set org.gnome.mutter check-alive-timeout 15000
-    install_goa_gdrive_automount
+    sudo install_goa_gdrive_automount
 }
 
 #--------------------------------------
